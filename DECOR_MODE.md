@@ -72,21 +72,9 @@ Autres réglages utiles pour la salle :
 - `"cwd"` : le dossier où s'ouvre le terminal, par exemple celui qui contient `game.js`.
 - `"termWebGL": false` : seulement si le terminal s'affiche mal après une mise en veille du PC. Le terminal repasse alors sur le rendu canvas.
 
-## Installer sur un eDEX-UI 2.2.8 déjà installé (Windows), sans recompiler
+## Installer sur le PC Windows
 
-Les modifications ne touchent que des fichiers JavaScript/HTML : aucune dépendance native ne change.
-
-1. Fermer eDEX-UI.
-2. Ouvrir un terminal dans le dossier `resources` de l'installation, par exemple `C:\Program Files\eDEX-UI\resources` ou `%LOCALAPPDATA%\Programs\eDEX-UI\resources`.
-3. Extraire l'archive : `npx @electron/asar extract app.asar app`
-4. Copier par-dessus, depuis `src/` de ce dépôt, en gardant les mêmes chemins relatifs :
-   - `_boot.js`, `_renderer.js`, `_multithread.js`, `ui.html`
-   - `classes\` : `decor.class.js` (nouveau), `clock`, `conninfo`, `cpuinfo`, `filesystem`, `hardwareInspector`, `locationGlobe`, `netstat`, `ramwatcher`, `sysinfo`, `terminal`, `toplist`, `updateChecker` (fichiers `.class.js`)
-   - `assets\vendor\encom-globe.js`
-5. Renommer `app.asar` en `app.asar.bak`. Electron charge alors le dossier `app`.
-6. Ajouter `"decorMode": true` dans `settings.json`, puis lancer eDEX-UI.
-
-Retour arrière : supprimer le dossier `app`, puis renommer `app.asar.bak` en `app.asar`.
+Il n'y a pas besoin de recompiler. Le pas-à-pas complet (sauvegarde, remplacement des fichiers, réglages, vérifications, retour arrière) est dans [`INSTALLATION_WINDOWS.md`](INSTALLATION_WINDOWS.md).
 
 ## Ce qui change aussi hors mode décor
 
