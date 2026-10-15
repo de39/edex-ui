@@ -31,7 +31,12 @@ class Decor {
             diskUse: 77.7,              // %
             diskLabel: "BLACKICE",
             pulseHalfLife: 2000,        // ms, how fast the terminal activity boost fades
-            pulseScale: 600             // chars of "energy" needed to reach ~63% of the max boost
+            pulseScale: 600,            // chars of "energy" needed to reach ~63% of the max boost
+            fakeClock: true,            // show a fictional date/time so players cannot read the real time
+            year: 2077,                 // year shown by the fake clock
+            clockOffsetMinutes: null,   // fixed shift of the fake time of day; null = random at each launch
+            clockSpeed: 1,              // how fast the fake clock runs (1 = real time)
+            uptimeDays: 77              // fake machine uptime, in days, at launch
         };
         let o = Object.assign({}, defaults, (overrides && typeof overrides === "object") ? overrides : {});
 
@@ -50,6 +55,17 @@ class Decor {
         o.pulseHalfLife = num(o.pulseHalfLife, defaults.pulseHalfLife, 100, 600000);
         o.pulseScale = num(o.pulseScale, defaults.pulseScale, 1, 1e9);
         o.seed = Math.floor(num(o.seed, defaults.seed, -2147483648, 2147483647));
+        o.fakeClock = (o.fakeClock !== false);
+        o.year = Math.round(num(o.year, defaults.year, 1970, 9999));
+        o.clockSpeed = num(o.clockSpeed, defaults.clockSpeed, 0.01, 100);
+        o.uptimeDays = num(o.uptimeDays, defaults.uptimeDays, 0, 99999);
+        if (o.clockOffsetMinutes === null || o.clockOffsetMinutes === undefined || o.clockOffsetMinutes === "random" || !isFinite(Number(o.clockOffsetMinutes))) {
+            // Random but clearly wrong: between 2h and 22h away from the real time of day, odd minutes.
+            // Math.random (not the seeded PRNG) so the hour changes at every launch.
+            o.clockOffsetMinutes = 120 + Math.floor(Math.random() * 1200) + 7;
+        } else {
+            o.clockOffsetMinutes = Number(o.clockOffsetMinutes);
+        }
         if (o.geo && typeof o.geo === "object") {
             o.latitude = o.geo.latitude;
             o.longitude = o.geo.longitude;
@@ -82,6 +98,13 @@ class Decor {
 
         let now = Date.now();
         this._born = now;
+
+        // Fake clock: the fictional time starts at (real time + offset) moved to the configured year,
+        // then advances clockSpeed times faster than the real time
+        this._realBase = now;
+        let fake = new Date(now + o.clockOffsetMinutes * 60000);
+        fake.setFullYear(o.year);
+        this._fakeBase = fake.getTime();
         this._lastTick = now;
         this._lastCounter = now;
         this._lastStats = 0;
@@ -141,10 +164,7 @@ class Decor {
             fsSize: () => this._fsSize(),
             blockDevices: () => this._blockDevices(),
             osInfo: () => ({ platform: (typeof process !== "undefined") ? process.platform : "linux", distro: o.osName, release: "7.7.7", codename: "BLACKICE", kernel: "7.7.7-ksp", arch: "x64", hostname: o.hostname, fqdn: o.hostname, logofile: "" }),
-            time: () => {
-                let t = Date.now();
-                return { current: t, uptime: Math.floor((t - this._bootTime) / 1000), timezone: "", timezoneName: "" };
-            }
+            time: () => ({ current: this.now().getTime(), uptime: this.uptime(), timezone: "", timezoneName: "" })
         };
         const warned = {};
         const wrappers = {};
@@ -542,8 +562,22 @@ class Decor {
             this._nextTransient = now + 10000 + this._rand() * 12000;
         }
     }
+    // Real epoch ms -> displayed epoch ms (fictional when fakeClock is on)
+    toDisplayTime(ms) {
+        if (!this.opts.fakeClock) return ms;
+        return Math.round(this._fakeBase + (ms - this._realBase) * this.opts.clockSpeed);
+    }
+    // Current displayed date (fictional when fakeClock is on): use it instead of new Date() in the UI
+    now() {
+        return new Date(this.toDisplayTime(Date.now()));
+    }
+    // Fake machine uptime in seconds (never the real one, which would tell how long the PC has been on)
+    uptime() {
+        let elapsed = Math.max(0, Date.now() - this._realBase) / 1000;
+        return Math.floor(this.opts.uptimeDays * 86400 + (7 * 3600 + 7 * 60) + elapsed * this.opts.clockSpeed);
+    }
     _fmtDate(ms) {
-        let d = new Date(ms);
+        let d = new Date(this.toDisplayTime(ms));
         let p = n => (n < 10 ? "0" : "") + n;
         return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }

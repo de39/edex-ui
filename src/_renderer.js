@@ -178,7 +178,7 @@ function waitForFonts() {
 // In decor mode (escape-game scenery), every call is answered in-process by the Decor simulator instead.
 function initSystemInformationProxy() {
     if (window.settings.decorMode === true) {
-        window.decor = new Decor(window.settings.decor || {});
+        window.decor = window.decor || new Decor(window.settings.decor || {});
         window.si = window.decor.si;
         ipc.send("log", "info", "Decor mode: system and network panels are simulated");
         return;
@@ -287,6 +287,14 @@ function initSystemInformationProxy() {
     });
 }
 
+// Decor mode simulator, created early so that the boot screen already uses its fake clock
+if (window.settings.decorMode === true) {
+    window.decor = new Decor(window.settings.decor || {});
+}
+
+// The filesystem panel is hidden unless explicitly enabled
+window.showFilesystem = (window.settings.showFilesystem === true);
+
 // Init audio
 window.audioManager = new AudioManager();
 
@@ -334,7 +342,7 @@ function displayLine() {
 
     switch(true) {
         case i === 2:
-            bootScreen.innerHTML += `eDEX-UI Kernel version ${electron.remote.app.getVersion()} boot at ${Date().toString()}; root:xnu-1699.22.73~1/RELEASE_X86_64`;
+            bootScreen.innerHTML += `eDEX-UI Kernel version ${electron.remote.app.getVersion()} boot at ${(window.decor ? window.decor.now() : new Date()).toString()}; root:xnu-1699.22.73~1/RELEASE_X86_64`;
         case i === 4:
             setTimeout(displayLine, 500);
             break;
@@ -457,9 +465,9 @@ async function initUI() {
     await _delay(700);
 
     document.getElementById("main_shell").setAttribute("style", "opacity: 0;");
-    document.body.innerHTML += `
+    document.body.innerHTML += `${window.showFilesystem ? `
     <section id="filesystem" style="width: 0px;" class="${window.settings.hideDotfiles ? "hideDotfiles" : ""} ${window.settings.fsListView ? "list-view" : ""}">
-    </section>
+    </section>` : ""}
     <section id="keyboard" style="opacity:0;">
     </section>`;
     window.keyboard = new Keyboard({
@@ -485,7 +493,7 @@ async function initUI() {
 
     greeter.setAttribute("style", "opacity: 1;");
 
-    document.getElementById("filesystem").setAttribute("style", "");
+    if (window.showFilesystem) document.getElementById("filesystem").setAttribute("style", "");
     document.getElementById("keyboard").setAttribute("style", "");
     document.getElementById("keyboard").setAttribute("class", "animation_state_1");
     window.audioManager.keyboard.play();
@@ -582,13 +590,15 @@ async function initUI() {
 
     await _delay(100);
 
-    window.fsDisp = new FilesystemDisplay({
-        parentId: "filesystem"
-    });
+    if (window.showFilesystem) {
+        window.fsDisp = new FilesystemDisplay({
+            parentId: "filesystem"
+        });
 
-    await _delay(200);
+        await _delay(200);
 
-    document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
+        document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
+    }
 
     // Resend terminal CWD to fsDisp if we're hot reloading
     if (window.performance.navigation.type === 1) {
@@ -636,7 +646,7 @@ window.focusShellTab = number => {
         window.term[number].term.focus();
         window.term[number].resendCWD();
 
-        window.fsDisp.followTab();
+        if (window.fsDisp) window.fsDisp.followTab();
     } else if (number > 0 && number <= 4 && window.term[number] !== null && typeof window.term[number] !== "object") {
         window.term[number] = null;
 
@@ -894,6 +904,14 @@ window.openSettings = async () => {
                             <option>${window.settings.decorMode !== true}</option>
                         </select></td>
                     </tr>
+                    <tr>
+                        <td>showFilesystem</td>
+                        <td>Show the filesystem panel (hidden by default)</td>
+                        <td><select id="settingsEditor-showFilesystem">
+                            <option>${window.settings.showFilesystem === true}</option>
+                            <option>${window.settings.showFilesystem !== true}</option>
+                        </select></td>
+                    </tr>
                 </table>
                 <h6 id="settingsEditorStatus">Loaded values from memory</h6>
                 <br>`,
@@ -946,7 +964,8 @@ window.writeSettingsFile = () => {
         fsListView: (document.getElementById("settingsEditor-fsListView").value === "true"),
         experimentalGlobeFeatures: (document.getElementById("settingsEditor-experimentalGlobeFeatures").value === "true"),
         experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true"),
-        decorMode: (document.getElementById("settingsEditor-decorMode").value === "true")
+        decorMode: (document.getElementById("settingsEditor-decorMode").value === "true"),
+        showFilesystem: (document.getElementById("settingsEditor-showFilesystem").value === "true")
     };
 
     // A structured "env" object cannot be edited in the text field: keep it unless it was actually changed
@@ -1146,12 +1165,15 @@ window.useAppShortcut = action => {
             window.openShortcutsHelp();
             return true;
         case "FUZZY_SEARCH":
+            if (!window.fsDisp) return false; // searches the filesystem panel's directory
             window.activeFuzzyFinder = new FuzzyFinder();
             return true;
         case "FS_LIST_VIEW":
+            if (!window.fsDisp) return false;
             window.fsDisp.toggleListview();
             return true;
         case "FS_DOTFILES":
+            if (!window.fsDisp) return false;
             window.fsDisp.toggleHidedotfiles();
             return true;
         case "KB_PASSMODE":

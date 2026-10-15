@@ -19,7 +19,8 @@ class Clock {
         }, 1000);
     }
     updateClock() {
-        let time = new Date();
+        // Decor mode shows a fictional time so players cannot use the clock as a countdown
+        let time = window.decor ? window.decor.now() : new Date();
         let array = [time.getHours(), time.getMinutes(), time.getSeconds()];
 
         // 12-hour mode translation

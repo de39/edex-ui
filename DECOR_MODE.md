@@ -38,10 +38,38 @@ Personnalisation facultative : un objet `"decor"` dans le même fichier. Toutes 
 }
 ```
 
+### Fausse date et fausse heure
+
+En mode décor, l'horloge, la date, l'uptime, l'écran de boot et les dates de la liste des processus affichent une heure fictive. Les joueurs ne peuvent donc pas s'en servir pour savoir combien de temps il leur reste.
+
+- L'année est **2077** ; le jour et le mois restent ceux du jour réel.
+- L'heure est décalée au hasard, de 2 h à 22 h, **à chaque lancement**. Les secondes défilent normalement.
+- L'uptime affiché part de 77 jours. Il ne trahit donc pas depuis quand le PC est allumé.
+
+Réglages possibles dans `"decor"` :
+
+```json
+"decor": {
+    "fakeClock": true,
+    "year": 2077,
+    "clockOffsetMinutes": null,
+    "clockSpeed": 1,
+    "uptimeDays": 77
+}
+```
+
+- `clockOffsetMinutes` : décalage fixe en minutes (par ex. `-180`). `null` donne un décalage aléatoire.
+- `clockSpeed` : vitesse de l'horloge. Par ex. `1.5` fait défiler le temps plus vite, ce qui met de la pression.
+- `fakeClock: false` : remet la vraie heure.
+
+### Panneau fichiers
+
+Il est **masqué par défaut** : le clavier se recentre. Pour le réafficher, mettre `"showFilesystem": true` (ou passer par la ligne `showFilesystem` de l'éditeur de réglages). Tant qu'il est masqué, les raccourcis qui en dépendent sont sans effet : recherche Ctrl+Shift+F, Ctrl+Shift+L et Ctrl+Shift+H.
+
 Autres réglages utiles pour la salle :
 
 - `"nointro": true` : supprime l'animation de démarrage.
-- `"cwd"` : pointer vers un petit dossier dédié au jeu (avec des fichiers « décor »), car le panneau fichiers affiche ce dossier.
+- `"cwd"` : le dossier où s'ouvre le terminal, par exemple celui qui contient `game.js`.
 - `"termWebGL": false` : seulement si le terminal s'affiche mal après une mise en veille du PC. Le terminal repasse alors sur le rendu canvas.
 
 ## Installer sur un eDEX-UI 2.2.8 déjà installé (Windows), sans recompiler
@@ -53,7 +81,7 @@ Les modifications ne touchent que des fichiers JavaScript/HTML : aucune dépenda
 3. Extraire l'archive : `npx @electron/asar extract app.asar app`
 4. Copier par-dessus, depuis `src/` de ce dépôt, en gardant les mêmes chemins relatifs :
    - `_boot.js`, `_renderer.js`, `_multithread.js`, `ui.html`
-   - `classes\` : `decor.class.js` (nouveau), `conninfo`, `cpuinfo`, `filesystem`, `hardwareInspector`, `locationGlobe`, `netstat`, `ramwatcher`, `sysinfo`, `terminal`, `toplist`, `updateChecker` (fichiers `.class.js`)
+   - `classes\` : `decor.class.js` (nouveau), `clock`, `conninfo`, `cpuinfo`, `filesystem`, `hardwareInspector`, `locationGlobe`, `netstat`, `ramwatcher`, `sysinfo`, `terminal`, `toplist`, `updateChecker` (fichiers `.class.js`)
    - `assets\vendor\encom-globe.js`
 5. Renommer `app.asar` en `app.asar.bak`. Electron charge alors le dossier `app`.
 6. Ajouter `"decorMode": true` dans `settings.json`, puis lancer eDEX-UI.

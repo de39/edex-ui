@@ -50,7 +50,8 @@ class Sysinfo {
         }, 60000);
     }
     updateDate() {
-        let time = new Date();
+        // Decor mode shows a fictional date (year 2077 by default)
+        let time = window.decor ? window.decor.now() : new Date();
 
         document.querySelector("#mod_sysinfo > div:first-child > h1").innerHTML = time.getFullYear();
 
@@ -99,13 +100,15 @@ class Sysinfo {
         // of the day and re-scheduled itself in a tight loop until midnight)
         let midnight = new Date(time.getFullYear(), time.getMonth(), time.getDate() + 1, 0, 0, 1);
         let timeToNewDay = Math.max(1000, midnight.getTime() - time.getTime());
+        // The fake clock may run faster than real time: re-check every minute at most
+        if (window.decor) timeToNewDay = Math.min(timeToNewDay, 60000);
         setTimeout(() => {
             this.updateDate();
         }, timeToNewDay);
     }
     updateUptime() {
         let uptime = {
-            raw: Math.floor(require("os").uptime()),
+            raw: window.decor ? window.decor.uptime() : Math.floor(require("os").uptime()),
             days: 0,
             hours: 0,
             minutes: 0

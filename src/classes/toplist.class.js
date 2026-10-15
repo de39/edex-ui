@@ -126,7 +126,7 @@ class Toplist {
 
                 let procs = Toplist._prepareList(data.list).map(proc => {
                     // Copy before adding runtime so a cached/shared result is never mutated
-                    return Object.assign({}, proc, {runtime: new Date(Date.now() - Date.parse(proc.started))});
+                    return Object.assign({}, proc, {runtime: new Date((window.decor ? window.decor.now().getTime() : Date.now()) - Date.parse(proc.started))});
                 });
 
                 let list = procs.sort((a, b) => {

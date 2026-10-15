@@ -94,7 +94,8 @@ if (!fs.existsSync(settingsFile)) {
         fsListView: false,
         experimentalGlobeFeatures: false,
         experimentalFeatures: false,
-        decorMode: false
+        decorMode: false,
+        showFilesystem: false
     }, "", 4));
     signale.info(`Default settings written to ${settingsFile}`);
 }
