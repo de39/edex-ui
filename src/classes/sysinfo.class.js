@@ -14,6 +14,7 @@ class Sysinfo {
             default:
                 os = require("os").platform();
         }
+        if (window.decor && window.decor.osName) os = window._escapeHtml(String(window.decor.osName));
 
         // Create DOM
         this.parent = document.getElementById(parentId);
@@ -41,10 +42,12 @@ class Sysinfo {
         this.uptimeUpdater = setInterval(() => {
             this.updateUptime();
         }, 60000);
+        // battery() is expensive on Windows (1 wmic + 2 PowerShell launches per call): poll it once a minute
+        this.updatingBattery = false;
         this.updateBattery();
         this.batteryUpdater = setInterval(() => {
             this.updateBattery();
-        }, 3000);
+        }, 60000);
     }
     updateDate() {
         let time = new Date();
@@ -92,7 +95,10 @@ class Sysinfo {
         }
         document.querySelector("#mod_sysinfo > div:first-child > h2").innerHTML = month+" "+time.getDate();
 
-        let timeToNewDay = ((23 - time.getHours()) * 3600000) + ((59 - time.getMinutes()) * 60000);
+        // Fire just after midnight (the former minutes-only computation reached 0 during the last minute
+        // of the day and re-scheduled itself in a tight loop until midnight)
+        let midnight = new Date(time.getFullYear(), time.getMonth(), time.getDate() + 1, 0, 0, 1);
+        let timeToNewDay = Math.max(1000, midnight.getTime() - time.getTime());
         setTimeout(() => {
             this.updateDate();
         }, timeToNewDay);
@@ -117,8 +123,11 @@ class Sysinfo {
         document.querySelector("#mod_sysinfo > div:nth-child(2) > h2").innerHTML = uptime.days + '<span style="opacity:0.5;">d</span>' + uptime.hours + '<span style="opacity:0.5;">:</span>' + uptime.minutes;
     }
     updateBattery() {
+        if (this.updatingBattery) return;
+        this.updatingBattery = true;
         window.si.battery().then(bat => {
             let indicator = document.querySelector("#mod_sysinfo > div:last-child > h2");
+            if (!indicator || !bat) return;
             if (bat.hasBattery) {
                 if (bat.isCharging) {
                     indicator.innerHTML = "CHARGE";
@@ -130,6 +139,10 @@ class Sysinfo {
             } else {
                 indicator.innerHTML = "ON";
             }
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
+            this.updatingBattery = false;
         });
     }
 }

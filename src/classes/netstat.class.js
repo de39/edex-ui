@@ -29,36 +29,72 @@ class Netstat {
         this.iface = null;
         this.failedAttempts = {};
         this.runsBeforeGeoIPUpdate = 0;
+        this.updatingInfo = false;
 
-        this._httpsAgent = new require("https").Agent({
-            keepAlive: false,
-            maxSockets: 10
-        });
+        // Init GeoIP integrated backend
+        this.geoLookup = {
+            get: () => null
+        };
+
+        if (window.decor) {
+            // Decor mode: everything is simulated in-process, no maxmind DB, no download, no https, no TCP ping
+            this.geoLookup = window.decor.geoLookup;
+            this.ipinfo = window.decor.ipinfo;
+            this.lastconn = {finished: true};
+        } else {
+            this._httpsAgent = new require("https").Agent({
+                keepAlive: false,
+                maxSockets: 10
+            });
+
+            let geolite2 = require("geolite2-redist");
+            let maxmind = require("maxmind");
+            geolite2.downloadDbs(require("path").join(require("@electron/remote").app.getPath("userData"), "geoIPcache")).then(() => {
+                return geolite2.open('GeoLite2-City', path => {
+                    return maxmind.open(path);
+                });
+            }).then(lookup => {
+                this.geoLookup = lookup;
+                this.lastconn.finished = true;
+            }).catch(e => {
+                // Offline or corrupted cache: keep the null lookup, the globe simply shows no pins
+                console.warn("NetStat: could not load GeoIP database", e);
+                try {
+                    let electron = require("electron");
+                    electron.ipcRenderer.send("log", "note", "NetStat: Could not load GeoIP database.");
+                    electron.ipcRenderer.send("log", "debug", `Error: ${e}`);
+                } catch(err) {
+                    // ignore
+                }
+            });
+        }
 
         // Init updaters
         this.updateInfo();
         this.infoUpdater = setInterval(() => {
             this.updateInfo();
         }, 2000);
-
-        // Init GeoIP integrated backend
-        this.geoLookup = {
-            get: () => null
-        };
-        let geolite2 = require("geolite2-redist");
-        let maxmind = require("maxmind");
-        geolite2.downloadDbs(require("path").join(require("@electron/remote").app.getPath("userData"), "geoIPcache")).then(() => {
-           geolite2.open('GeoLite2-City', path => {
-                return maxmind.open(path);
-            }).catch(e => {throw e}).then(lookup => {
-                this.geoLookup = lookup;
-                this.lastconn.finished = true;
-            });
-        });
+    }
+    _setOffline() {
+        this.offline = true;
+        document.querySelector("#mod_netstat_innercontainer > div:first-child > h2").innerHTML = "OFFLINE";
+        document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = "--.--.--.--";
+        document.querySelector("#mod_netstat_innercontainer > div:nth-child(3) > h2").innerHTML = "--ms";
     }
     updateInfo() {
-        window.si.networkInterfaces().then(async data => {
+        if (this.updatingInfo) return;
+        this.updatingInfo = true;
+
+        // networkInterfaces(false): systeminformation reuses its cached result unless the OS interfaces changed
+        window.si.networkInterfaces(false).then(async data => {
             let offline = false;
+
+            if (!Array.isArray(data) || data.length === 0) {
+                this.iface = null;
+                document.getElementById("mod_netstat_iname").innerText = "Interface: (offline)";
+                this._setOffline();
+                return;
+            }
 
             let net = data[0];
             let netID = 0;
@@ -86,11 +122,8 @@ class Netstat {
                         this.iface = null;
                         document.getElementById("mod_netstat_iname").innerText = "Interface: (offline)";
 
-                        this.offline = true;
-                        document.querySelector("#mod_netstat_innercontainer > div:first-child > h2").innerHTML = "OFFLINE";
-                        document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = "--.--.--.--";
-                        document.querySelector("#mod_netstat_innercontainer > div:nth-child(3) > h2").innerHTML = "--ms";
-                        break;
+                        this._setOffline();
+                        return;
                     }
                 }
             }
@@ -100,6 +133,16 @@ class Netstat {
             this.iface = net.iface;
             this.internalIPv4 = net.ip4;
             document.getElementById("mod_netstat_iname").innerText = "Interface: "+net.iface;
+
+            if (window.decor) {
+                let p = await window.decor.ping();
+                this.ipinfo = window.decor.ipinfo;
+                this.offline = false;
+                document.querySelector("#mod_netstat_innercontainer > div:first-child > h2").innerHTML = "ONLINE";
+                document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = window._escapeHtml(String(this.ipinfo.ip));
+                document.querySelector("#mod_netstat_innercontainer > div:nth-child(3) > h2").innerHTML = Math.round(p)+"ms";
+                return;
+            }
 
             if (net.ip4 === "127.0.0.1") {
                 offline = true;
@@ -113,13 +156,14 @@ class Netstat {
                         res.on("end", () => {
                             try {
                                 let data = JSON.parse(rawData);
+                                let geo = this.geoLookup.get(data.ip);
                                 this.ipinfo = {
                                     ip: data.ip,
-                                    geo: this.geoLookup.get(data.ip).location
+                                    geo: geo.location
                                 };
 
                                 let ip = this.ipinfo.ip;
-                                document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = window._escapeHtml(ip);
+                                document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = window._escapeHtml(String(ip));
 
                                 this.runsBeforeGeoIPUpdate = 10;
                             } catch(e) {
@@ -143,14 +187,16 @@ class Netstat {
 
                 this.offline = offline;
                 if (offline) {
-                    document.querySelector("#mod_netstat_innercontainer > div:first-child > h2").innerHTML = "OFFLINE";
-                    document.querySelector("#mod_netstat_innercontainer > div:nth-child(2) > h2").innerHTML = "--.--.--.--";
-                    document.querySelector("#mod_netstat_innercontainer > div:nth-child(3) > h2").innerHTML = "--ms";
+                    this._setOffline();
                 } else {
                     document.querySelector("#mod_netstat_innercontainer > div:first-child > h2").innerHTML = "ONLINE";
                     document.querySelector("#mod_netstat_innercontainer > div:nth-child(3) > h2").innerHTML = Math.round(p)+"ms";
                 }
             }
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
+            this.updatingInfo = false;
         });
     }
     ping(target, port, local) {

@@ -175,26 +175,113 @@ function waitForFonts() {
 }
 
 // A proxy function used to add multithreading to systeminformation calls - see backend process manager @ _multithread.js
+// In decor mode (escape-game scenery), every call is answered in-process by the Decor simulator instead.
 function initSystemInformationProxy() {
+    if (window.settings.decorMode === true) {
+        window.decor = new Decor(window.settings.decor || {});
+        window.si = window.decor.si;
+        ipc.send("log", "info", "Decor mode: system and network panels are simulated");
+        return;
+    }
+    window.decor = undefined;
+
     const { nanoid } = require("nanoid/non-secure");
+
+    // Results shared between modules for a short while (e.g. Toplist and Cpuinfo both poll processes())
+    const cacheTTL = {
+        processes: 2500,
+        networkInterfaces: 2000
+    };
+    const callTimeout = 20000;
+    const inflight = new Map();
+    const cache = new Map();
+
+    // Consumers mutate results (Toplist sorts/splices processes().list), so shared results are handed out as copies
+    const copy = res => (res === null || typeof res !== "object") ? res : JSON.parse(JSON.stringify(res));
+
+    // Single IPC round-trip. Main replies (res) on success, or (null, "error string") on failure.
+    const request = (prop, args) => {
+        return new Promise((resolve, reject) => {
+            let id = nanoid();
+            let channel = "systeminformation-reply-"+id;
+            let timer = null;
+            let listener = (e, res, err) => {
+                ipc.removeListener(channel, listener);
+                clearTimeout(timer);
+                if (typeof err === "string") {
+                    reject(new Error(`systeminformation.${String(prop)}(): ${err}`));
+                } else {
+                    resolve(res);
+                }
+            };
+            timer = setTimeout(() => {
+                ipc.removeListener(channel, listener);
+                reject(new Error(`systeminformation.${String(prop)}() timed out after ${callTimeout/1000}s`));
+            }, callTimeout);
+            ipc.on(channel, listener);
+            try {
+                ipc.send("systeminformation-call", prop, id, ...args);
+            } catch(e) {
+                ipc.removeListener(channel, listener);
+                clearTimeout(timer);
+                reject(e);
+            }
+        });
+    };
 
     window.si = new Proxy({}, {
         apply: () => {throw new Error("Cannot use sysinfo proxy directly as a function")},
         set: () => {throw new Error("Cannot set a property on the sysinfo proxy")},
         get: (target, prop, receiver) => {
-            return function(...args) {
-                let callback = (typeof args[args.length - 1] === "function") ? true : false;
+            // Never look like a thenable
+            if (typeof prop !== "string" || prop === "then") return undefined;
 
-                return new Promise((resolve, reject) => {
-                    let id = nanoid();
-                    ipc.once("systeminformation-reply-"+id, (e, res) => {
-                        if (callback) {
-                            args[args.length - 1](res);
+            return function(...args) {
+                let callback = (typeof args[args.length - 1] === "function") ? args.pop() : null;
+
+                let key = null;
+                try {
+                    key = prop+":"+JSON.stringify(args);
+                } catch(e) {
+                    // Non-serialisable arguments: no sharing
+                }
+
+                let promise;
+                if (key === null) {
+                    promise = request(prop, args);
+                } else {
+                    let ttl = cacheTTL[prop] || 0;
+                    let cached = (ttl > 0) ? cache.get(key) : undefined;
+
+                    if (cached && Date.now() - cached.time < ttl) {
+                        promise = Promise.resolve(copy(cached.res));
+                    } else {
+                        let entry = inflight.get(key);
+                        if (!entry) {
+                            entry = {
+                                consumers: 0,
+                                promise: request(prop, args).then(res => {
+                                    if (ttl > 0) cache.set(key, {time: Date.now(), res});
+                                    return res;
+                                }).finally(() => {
+                                    inflight.delete(key);
+                                })
+                            };
+                            inflight.set(key, entry);
                         }
-                        resolve(res);
+                        entry.consumers++;
+                        // A lone consumer of an uncached result gets it as-is, everyone else gets a copy
+                        promise = entry.promise.then(res => (ttl > 0 || entry.consumers > 1) ? copy(res) : res);
+                    }
+                }
+
+                if (callback) {
+                    promise = promise.then(res => {
+                        callback(res);
+                        return res;
                     });
-                    ipc.send("systeminformation-call", prop, id, ...args);
-                });
+                }
+                return promise;
             };
         }
     });
@@ -207,6 +294,7 @@ window.audioManager = new AudioManager();
 electron.remote.app.focus();
 
 let i = 0;
+let bootLog = null; // declared before displayLine() is first called (TDZ)
 if (window.settings.nointro || window.settings.nointroOverride) {
     initGraphicalErrorHandling();
     initSystemInformationProxy();
@@ -220,7 +308,10 @@ if (window.settings.nointro || window.settings.nointroOverride) {
 // Startup boot log
 function displayLine() {
     let bootScreen = document.getElementById("boot_screen");
-    let log = fs.readFileSync(path.join(__dirname, "assets", "misc", "boot_log.txt")).toString().split('\n');
+    if (bootLog === null) {
+        bootLog = fs.readFileSync(path.join(__dirname, "assets", "misc", "boot_log.txt")).toString().split('\n');
+    }
+    let log = bootLog;
 
     function isArchUser() {
         return require("os").platform() === "linux"
@@ -795,6 +886,14 @@ window.openSettings = async () => {
                             <option>${!window.settings.experimentalFeatures}</option>
                         </select></td>
                     </tr>
+                    <tr>
+                        <td>decorMode</td>
+                        <td>Escape-game scenery mode: simulate every system/network panel (no real system calls)</td>
+                        <td><select id="settingsEditor-decorMode">
+                            <option>${window.settings.decorMode === true}</option>
+                            <option>${window.settings.decorMode !== true}</option>
+                        </select></td>
+                    </tr>
                 </table>
                 <h6 id="settingsEditorStatus">Loaded values from memory</h6>
                 <br>`,
@@ -820,7 +919,8 @@ window.writeFile = (path) => {
 };
 
 window.writeSettingsFile = () => {
-    window.settings = {
+    let previous = window.settings || {};
+    let formValues = {
         shell: document.getElementById("settingsEditor-shell").value,
         shellArgs: document.getElementById("settingsEditor-shellArgs").value,
         cwd: document.getElementById("settingsEditor-cwd").value,
@@ -840,14 +940,38 @@ window.writeSettingsFile = () => {
         nocursor: (document.getElementById("settingsEditor-nocursor").value === "true"),
         iface: document.getElementById("settingsEditor-iface").value,
         allowWindowed: (document.getElementById("settingsEditor-allowWindowed").value === "true"),
-        forceFullscreen: window.settings.forceFullscreen,
         keepGeometry: (document.getElementById("settingsEditor-keepGeometry").value === "true"),
         excludeThreadsFromToplist: (document.getElementById("settingsEditor-excludeThreadsFromToplist").value === "true"),
         hideDotfiles: (document.getElementById("settingsEditor-hideDotfiles").value === "true"),
         fsListView: (document.getElementById("settingsEditor-fsListView").value === "true"),
         experimentalGlobeFeatures: (document.getElementById("settingsEditor-experimentalGlobeFeatures").value === "true"),
-        experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true")
+        experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true"),
+        decorMode: (document.getElementById("settingsEditor-decorMode").value === "true")
     };
+
+    // A structured "env" object cannot be edited in the text field: keep it unless it was actually changed
+    if (previous.env && typeof previous.env === "object" && formValues.env === String(previous.env)) {
+        formValues.env = previous.env;
+    }
+
+    // In decor mode the iface select only lists simulated interfaces ("ksp0"), and Netstat may have reset
+    // window.settings.iface at runtime: keep the iface value currently stored in settings.json instead
+    if (window.decor) {
+        let storedIface;
+        try {
+            storedIface = JSON.parse(fs.readFileSync(settingsFile, {encoding: "utf-8"})).iface;
+        } catch(e) {
+            storedIface = undefined;
+        }
+        formValues.iface = storedIface;
+    }
+
+    // Keep the keys the form does not know about (decor, forceFullscreen, custom keys...), apply the form values over them
+    window.settings = Object.assign({}, previous, formValues);
+
+    // Runtime-only values (CLI flags overrides) must not be persisted
+    delete window.settings.nointroOverride;
+    delete window.settings.nocursorOverride;
 
     Object.keys(window.settings).forEach(key => {
         if (window.settings[key] === "undefined") {
@@ -856,6 +980,8 @@ window.writeSettingsFile = () => {
     });
 
     fs.writeFileSync(settingsFile, JSON.stringify(window.settings, "", 4));
+    window.settings.nointroOverride = previous.nointroOverride;
+    window.settings.nocursorOverride = previous.nocursorOverride;
     document.getElementById("settingsEditorStatus").innerText = "New values written to settings.json file at "+new Date().toTimeString();
 };
 

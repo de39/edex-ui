@@ -93,7 +93,8 @@ if (!fs.existsSync(settingsFile)) {
         hideDotfiles: false,
         fsListView: false,
         experimentalGlobeFeatures: false,
-        experimentalFeatures: false
+        experimentalFeatures: false,
+        decorMode: false
     }, "", 4));
     signale.info(`Default settings written to ${settingsFile}`);
 }
@@ -268,8 +269,19 @@ app.on('ready', async () => {
     };
 
     // Support for multithreaded systeminformation calls
-    signale.pending("Starting multithreaded calls controller...");
-    require("./_multithread.js");
+    if (settings.decorMode === true) {
+        // Escape-game scenery mode: the renderer simulates every system panel, no worker process needed
+        signale.info("Decor mode is ON: system panels are simulated, multithreaded calls controller not started");
+        // If the UI gets reloaded with decor mode turned off, start the controller on its first request
+        ipc.once("systeminformation-call", (e, ...args) => {
+            signale.pending("Starting multithreaded calls controller (decor mode turned off)...");
+            require("./_multithread.js");
+            ipc.emit("systeminformation-call", e, ...args);
+        });
+    } else {
+        signale.pending("Starting multithreaded calls controller...");
+        require("./_multithread.js");
+    }
 
     createWindow(settings);
 

@@ -62,7 +62,7 @@ class LocationGlobe {
                             // We probably got caught in a theme change. Print it out but everything should keep running fine.
                             console.warn(e);
                         }
-                    }, 1000 / 30);
+                    }, 1000 / 15);
                 }
             };
             this.globe.init(window.theme.colors.light_black, () => {
@@ -88,7 +88,7 @@ class LocationGlobe {
                 } catch {
                     // do nothing
                 }
-                let geo = (data !== null ? data.location : {});
+                let geo = (data && data.location) ? data.location : {};
                 if (geo.latitude && geo.longitude) {
                     const lat = Number(geo.latitude);
                     const lon = Number(geo.longitude);
@@ -100,7 +100,12 @@ class LocationGlobe {
             };
             this.removeConn = ip => {
                 let index = this.conns.findIndex(x => x.ip === ip);
-                this.conns[index].pin.remove();
+                if (index === -1) return;
+                try {
+                    this.conns[index].pin.remove();
+                } catch(e) {
+                    // Pin already gone (removePins() after a location change)
+                }
                 this.conns.splice(index, 1);
             };
 
@@ -126,10 +131,11 @@ class LocationGlobe {
                 this.updateLoc();
             }, 1000);
 
+            this.updatingConns = false;
             this.updateConns();
             this.connsUpdater = setInterval(() => {
                 this.updateConns();
-            }, 3000);
+            }, (window.decor) ? 5000 : 10000);
         }, 4000);
     }
 
@@ -140,8 +146,14 @@ class LocationGlobe {
         this.globe.addMarker(randomLat - 20, randomLong + 150, '', true);
     }
     addTemporaryConnectedMarker(ip) {
-        let data = window.mods.netstat.geoLookup.get(ip);
-        let geo = (data !== null ? data.location : {});
+        if (!this.globe || !window.mods.netstat || !window.mods.netstat.geoLookup) return;
+        let data = null;
+        try {
+            data = window.mods.netstat.geoLookup.get(ip);
+        } catch(e) {
+            // Invalid IP or lookup not ready
+        }
+        let geo = (data && data.location) ? data.location : {};
         if (geo.latitude && geo.longitude) {
             const lat = Number(geo.latitude);
             const lon = Number(geo.longitude);
@@ -190,7 +202,15 @@ class LocationGlobe {
         }
     }
     async updateConOnlineConnection() {
-        let newgeo = window.mods.netstat.ipinfo.geo;
+        if (!this.globe) return;
+        let ipinfo = window.mods.netstat.ipinfo;
+        if (!ipinfo || !ipinfo.geo) return;
+        // Copy: never mutate the shared ipinfo.geo object
+        let newgeo = {
+            latitude: Number(ipinfo.geo.latitude),
+            longitude: Number(ipinfo.geo.longitude)
+        };
+        if (isNaN(newgeo.latitude) || isNaN(newgeo.longitude)) return;
         newgeo.latitude = Math.round(newgeo.latitude*10000)/10000;
         newgeo.longitude = Math.round(newgeo.longitude*10000)/10000;
 
@@ -211,7 +231,10 @@ class LocationGlobe {
     }
     updateConns() {
         if (!window.mods.globe.globe || window.mods.netstat.offline) return false;
+        if (this.updatingConns) return false;
+        this.updatingConns = true;
         window.si.networkConnections().then(conns => {
+            if (!Array.isArray(conns)) return;
             let newconns = [];
             conns.forEach(conn => {
                 let ip = conn.peeraddress;
@@ -221,7 +244,8 @@ class LocationGlobe {
                 }
             });
 
-            this.conns.forEach(conn => {
+            // Iterate over a copy: removeConn() splices this.conns
+            this.conns.slice().forEach(conn => {
                 if (newconns.indexOf(conn.ip) !== -1) {
                     newconns.splice(newconns.indexOf(conn.ip), 1);
                 } else {
@@ -232,6 +256,10 @@ class LocationGlobe {
             newconns.forEach(ip => {
                 this.addConn(ip);
             });
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
+            this.updatingConns = false;
         });
     }
 }

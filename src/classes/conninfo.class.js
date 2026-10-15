@@ -24,7 +24,7 @@ class Conninfo {
 
         // Set chart options
         let chartOptions = [{
-            limitFPS: 40,
+            limitFPS: 15,
             responsive: true,
             millisPerPixel: 70,
             interpolation: 'linear',
@@ -52,26 +52,35 @@ class Conninfo {
         this.charts[0].addTimeSeries(this.series[0], {lineWidth:1.7,strokeStyle:`rgb(${window.theme.r},${window.theme.g},${window.theme.b})`});
         this.charts[1].addTimeSeries(this.series[1], {lineWidth:1.7,strokeStyle:`rgb(${window.theme.r},${window.theme.g},${window.theme.b})`});
 
-        this.charts[0].streamTo(document.getElementById("mod_conninfo_canvas_top"), 1000);
-        this.charts[1].streamTo(document.getElementById("mod_conninfo_canvas_bottom"), 1000);
+        // Delay matches the 2 s polling so the line never shows a gap at the leading edge
+        this.charts[0].streamTo(document.getElementById("mod_conninfo_canvas_top"), 2000);
+        this.charts[1].streamTo(document.getElementById("mod_conninfo_canvas_bottom"), 2000);
 
         // Init updater
+        this.currentlyUpdating = false;
         this.updateInfo();
         this.infoUpdater = setInterval(() => {
             this.updateInfo();
-        }, 1000);
+        }, 2000);
     }
     updateInfo() {
         let time = new Date().getTime();
+        let container = document.querySelector("div#mod_conninfo");
 
-        if (window.mods.netstat.offline || window.mods.netstat.iface === null) {
+        if (!window.mods.netstat || window.mods.netstat.offline || window.mods.netstat.iface === null) {
             this.series[0].append(time, 0);
             this.series[1].append(time, 0);
-            document.querySelector("div#mod_conninfo").setAttribute("class", "offline");
+            if (container) container.setAttribute("class", "offline");
             return;
         } else {
-            document.querySelector("div#mod_conninfo").setAttribute("class", "");
+            if (container) container.setAttribute("class", "");
+            if (this.currentlyUpdating) return;
+            this.currentlyUpdating = true;
             window.si.networkStats(window.mods.netstat.iface).then(data => {
+                if (!Array.isArray(data) || !data[0]) return;
+                let stats = data[0];
+                let tx = Number(stats.tx_sec) || 0;
+                let rx = Number(stats.rx_sec) || 0;
 
                 let max0 = this.series[0].maxValue;
                 let max1 = -this.series[1].minValue;
@@ -81,11 +90,15 @@ class Conninfo {
                     this.series[0].maxValue = max1;
                 }
 
-                this.series[0].append(time, data[0].tx_sec/125000);
-                this.series[1].append(time, -data[0].rx_sec/125000);
+                this.series[0].append(time, tx/125000);
+                this.series[1].append(time, -rx/125000);
 
-                this.total.innerText = `${this._pb(data[0].tx_bytes)} OUT, ${this._pb(data[0].rx_bytes)} IN`.toUpperCase();
-                this.current.innerText = "UP " + parseFloat(data[0].tx_sec/125000).toFixed(2) + " DOWN " + parseFloat(data[0].rx_sec/125000).toFixed(2);
+                this.total.innerText = `${this._pb(Number(stats.tx_bytes) || 0)} OUT, ${this._pb(Number(stats.rx_bytes) || 0)} IN`.toUpperCase();
+                this.current.innerText = "UP " + parseFloat(tx/125000).toFixed(2) + " DOWN " + parseFloat(rx/125000).toFixed(2);
+            }).catch(e => {
+                console.warn(e);
+            }).finally(() => {
+                this.currentlyUpdating = false;
             });
         }
     }
