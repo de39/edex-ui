@@ -71,6 +71,7 @@ Autres réglages utiles pour la salle :
 - `"nointro": true` : supprime l'animation de démarrage.
 - `"fastBoot"` : actif par défaut en mode décor. L'interface apparaît d'un coup, en environ 1 à 2 s, au lieu de jouer son animation d'entrée, qui ajoute environ 3,5 s. Mettre `"fastBoot": false` pour retrouver l'animation d'origine.
 - `"cwd"` : le dossier où s'ouvre le terminal, par exemple celui qui contient `game.js`.
+- `"controlPort"` (par défaut `3777`) : port local de la commande de fermeture. `http://127.0.0.1:3777/quit` ferme eDEX proprement en moins d'une seconde, terminal et jeu compris. L'orchestrateur l'utilise pour le `RESET`. Le port n'est accessible que depuis le PC lui-même. `"controlPort": false` désactive la commande.
 - `"termWebGL": false` : seulement si le terminal s'affiche mal après une mise en veille du PC. Le terminal repasse alors sur le rendu canvas.
 
 ## Installer sur le PC Windows

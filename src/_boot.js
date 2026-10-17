@@ -1,9 +1,13 @@
 const signale = require("signale");
 const {app, BrowserWindow, dialog, shell} = require("electron");
 
+// Set when eDEX is shutting down: an error at that point must not open a blocking
+// "eDEX-UI crashed" box (it would keep the process alive until someone clicks OK)
+var quitting = false;
+
 process.on("uncaughtException", e => {
     signale.fatal(e);
-    dialog.showErrorBox("eDEX-UI crashed", e.message || "Cannot retrieve error message.");
+    if (!quitting) dialog.showErrorBox("eDEX-UI crashed", e.message || "Cannot retrieve error message.");
     if (tty) {
         tty.close();
     }
@@ -257,6 +261,31 @@ app.on('ready', async () => {
         signale.complete("Terminal exited", code, signal);
         app.quit();
     };
+
+    // Local control server, for the escape-game orchestrator: GET http://127.0.0.1:3777/quit closes eDEX
+    // cleanly and quickly, GET /ping answers "pong". Listens on 127.0.0.1 only. "controlPort": false disables it.
+    if (settings.controlPort !== false) {
+        let controlPort = Number(settings.controlPort) || 3777;
+        let control = require("http").createServer((req, res) => {
+            let route = (req.url || "").split("?")[0];
+            if (route === "/quit") {
+                res.end("bye");
+                shutdownNow("control server");
+            } else if (route === "/ping") {
+                res.end("pong");
+            } else {
+                res.statusCode = 404;
+                res.end();
+            }
+        });
+        control.on("error", e => {
+            // e.g. port already in use: eDEX keeps running, only the remote quit is unavailable
+            signale.warn(`Control server unavailable on port ${controlPort}: ${e.message}`);
+        });
+        control.listen(controlPort, "127.0.0.1", () => {
+            signale.info(`Control server listening on 127.0.0.1:${controlPort}`);
+        });
+    }
     tty.onopened = () => {
         signale.success("Connected to frontend!");
         signale.timeEnd("Startup");
@@ -377,12 +406,38 @@ app.on('window-all-closed', () => {
     app.quit();
 });
 
+// Close every terminal (shell + programs running in it, e.g. the game)
+function closeAllTtys() {
+    try {
+        if (tty) tty.close();
+    } catch(e) {
+        signale.warn("Error while closing the main terminal: "+e);
+    }
+    if (extraTtys) {
+        Object.keys(extraTtys).forEach(key => {
+            try {
+                if (extraTtys[key] !== null) extraTtys[key].close();
+            } catch(e) {
+                // already closed
+            }
+        });
+    }
+}
+
 app.on('before-quit', () => {
-    tty.close();
-    Object.keys(extraTtys).forEach(key => {
-        if (extraTtys[key] !== null) {
-            extraTtys[key].close();
-        }
-    });
+    quitting = true;
+    closeAllTtys();
     signale.complete("Shutting down...");
 });
+
+// Fast, reliable shutdown requested from outside (see the control server below).
+// The usual "close the window" path (taskkill without /F) depends on Windows messages and on node-pty's
+// slow terminal teardown, so it often ends up being forced anyway.
+function shutdownNow(reason) {
+    if (quitting) return;
+    quitting = true;
+    signale.complete(`Shutdown requested (${reason})`);
+    closeAllTtys();
+    // Give node-pty a moment to close the pseudo-console, then exit without waiting for anything else
+    setTimeout(() => app.exit(0), 500);
+}
