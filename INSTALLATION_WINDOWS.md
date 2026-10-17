@@ -8,6 +8,24 @@ On garde donc l'eDEX-UI déjà installé et on remplace seulement ses fichiers d
 
 Recompiler l'installeur ne servirait que si l'on changeait un jour les dépendances, par exemple la version d'Electron. Cela demande Visual Studio Build Tools, Python et Node 14 : c'est long et inutile ici.
 
+## Méthode simple : paquet prêt à l'emploi (recommandée)
+
+Un paquet `eDEX-KASPER-resources.zip` contient déjà tout : l'archive `app.asar`, qui regroupe eDEX 2.2.8 officiel et toutes les modifications en un seul fichier, et son dossier `app.asar.unpacked`, qui contient le module terminal pour Windows. Il n'y a ni outil à installer, ni extraction à faire.
+
+Une archive unique se charge aussi plus vite qu'un dossier de près de 2 000 fichiers, car l'antivirus de Windows analyse chaque fichier ouvert.
+
+1. Fermer eDEX-UI.
+2. Extraire le zip. On obtient un dossier `resources` qui contient `app.asar` et `app.asar.unpacked`.
+3. Dans le dossier d'installation (`C:\Program Files\eDEX-UI\resources`) :
+   - **supprimer ou renommer le dossier `app`** s'il existe : Electron charge ce dossier en priorité, et l'archive serait alors ignorée ;
+   - garder `app.asar.bak` comme sauvegarde ;
+   - copier `app.asar` et `app.asar.unpacked` depuis le zip, en remplaçant les fichiers existants (Windows demandera une confirmation administrateur).
+4. Faire les étapes 6 et 7 ci-dessous : réglages, puis vérification.
+
+**Retour arrière :** remettre `app.asar.bak` à la place de `app.asar`.
+
+La méthode manuelle ci-dessous reste valable si vous n'avez pas le paquet.
+
 ## Avant de commencer
 
 **Ce qu'il faut :**
