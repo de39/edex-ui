@@ -68,3 +68,8 @@ section > h3.title:first-child::after {
     bottom: -0.555vh;
     height: 0.46vh;
 }
+
+/* Fast boot: no entrance transitions while the UI is being built (class removed once it is ready) */
+body.fastboot, body.fastboot * {
+    transition: none !important;
+}

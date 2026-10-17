@@ -67,6 +67,15 @@ class Conninfo {
         let time = new Date().getTime();
         let container = document.querySelector("div#mod_conninfo");
 
+        // At startup, Netstat may not have detected the interface yet: the next poll will show the real state.
+        // (Do not flash "OFFLINE" for 2 s, which is visible with fast boot.)
+        if (!this._firstPollDone && window.mods.netstat && window.mods.netstat.iface === null && !window.mods.netstat.offline) {
+            this._firstPollDone = true;
+            setTimeout(() => this.updateInfo(), 300);
+            return;
+        }
+        this._firstPollDone = true;
+
         if (!window.mods.netstat || window.mods.netstat.offline || window.mods.netstat.iface === null) {
             this.series[0].append(time, 0);
             this.series[1].append(time, 0);

@@ -122,7 +122,7 @@ class LocationGlobe {
             }
 
             this.globe.addConstellation(constellation);
-        }, 2000);
+        }, window.fastBoot ? 300 : 2000); // fast boot: the layout is already final, no need to wait for the fade-in
 
         // Init updaters when intro animation is done
         setTimeout(() => {
@@ -136,7 +136,7 @@ class LocationGlobe {
             this.connsUpdater = setInterval(() => {
                 this.updateConns();
             }, (window.decor) ? 5000 : 10000);
-        }, 4000);
+        }, window.fastBoot ? 1500 : 4000);
     }
 
     addRandomConnectedMarkers() {

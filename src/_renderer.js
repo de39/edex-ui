@@ -295,6 +295,12 @@ if (window.settings.decorMode === true) {
 // The filesystem panel is hidden unless explicitly enabled
 window.showFilesystem = (window.settings.showFilesystem === true);
 
+// Fast boot (on by default in decor mode, or with "fastBoot": true): the UI appears at once instead of
+// playing its ~3.5 s entrance animation. "fastBoot": false keeps the original animation.
+window.fastBoot = (window.settings.fastBoot === true) || (window.settings.decorMode === true && window.settings.fastBoot !== false);
+// Pause used by the startup sequence: skipped in fast boot
+window.uiDelay = ms => window._delay(window.fastBoot ? 0 : ms);
+
 // Init audio
 window.audioManager = new AudioManager();
 
@@ -441,6 +447,8 @@ async function getDisplayName() {
 
 // Create the UI's html structure and initialize the terminal client and the keyboard
 async function initUI() {
+    // Fast boot: skip the entrance choreography (about 3.5 s of deliberate pauses and CSS transitions)
+    if (window.fastBoot) document.body.classList.add("fastboot");
     document.body.innerHTML += `<section class="mod_column" id="mod_column_left">
         <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
     </section>
@@ -452,17 +460,17 @@ async function initUI() {
         <h3 class="title"><p>PANEL</p><p>NETWORK</p></h3>
     </section>`;
 
-    await _delay(10);
+    await uiDelay(10);
 
     window.audioManager.expand.play();
     document.getElementById("main_shell").setAttribute("style", "height:0%;margin-bottom:30vh;");
 
-    await _delay(500);
+    await uiDelay(500);
 
     document.getElementById("main_shell").setAttribute("style", "margin-bottom: 30vh;");
     document.querySelector("#main_shell > h3.title").setAttribute("style", "");
 
-    await _delay(700);
+    await uiDelay(700);
 
     document.getElementById("main_shell").setAttribute("style", "opacity: 0;");
     document.body.innerHTML += `${window.showFilesystem ? `
@@ -475,11 +483,11 @@ async function initUI() {
         container: "keyboard"
     });
 
-    await _delay(10);
+    await uiDelay(10);
 
     document.getElementById("main_shell").setAttribute("style", "");
 
-    await _delay(270);
+    await uiDelay(270);
 
     let greeter = document.getElementById("main_shell_greeting");
 
@@ -498,19 +506,19 @@ async function initUI() {
     document.getElementById("keyboard").setAttribute("class", "animation_state_1");
     window.audioManager.keyboard.play();
 
-    await _delay(100);
+    await uiDelay(100);
 
     document.getElementById("keyboard").setAttribute("class", "animation_state_1 animation_state_2");
 
-    await _delay(1000);
+    await uiDelay(1000);
 
     greeter.setAttribute("style", "opacity: 0;");
 
-    await _delay(100);
+    await uiDelay(100);
 
     document.getElementById("keyboard").setAttribute("class", "");
 
-    await _delay(400);
+    await uiDelay(400);
 
     greeter.remove();
 
@@ -550,9 +558,9 @@ async function initUI() {
             }
             i++;
         }
-    }, 500);
+    }, window.fastBoot ? 30 : 500);
 
-    await _delay(100);
+    await uiDelay(100);
 
     // Initialize the terminal
     let shellContainer = document.getElementById("main_shell");
@@ -588,14 +596,14 @@ async function initUI() {
     };
     window.term[0].term.writeln("\033[1m"+`Welcome to eDEX-UI v${electron.remote.app.getVersion()} - Electron v${process.versions.electron}`+"\033[0m");
 
-    await _delay(100);
+    await uiDelay(100);
 
     if (window.showFilesystem) {
         window.fsDisp = new FilesystemDisplay({
             parentId: "filesystem"
         });
 
-        await _delay(200);
+        await uiDelay(200);
 
         document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
     }
@@ -605,9 +613,21 @@ async function initUI() {
         window.term[window.currentTerm].resendCWD();
     }
 
-    await _delay(200);
+    await uiDelay(200);
 
     window.updateCheck = new UpdateChecker();
+
+    if (window.fastBoot) {
+        // Restore the normal UI transitions, then make sure the terminal fits its final size
+        document.body.classList.remove("fastboot");
+        setTimeout(() => {
+            try {
+                window.term[window.currentTerm].fit();
+            } catch(e) {
+                // terminal not ready yet: it refits itself on connection
+            }
+        }, 300);
+    }
 }
 
 window.themeChanger = theme => {
