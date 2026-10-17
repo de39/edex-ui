@@ -1,5 +1,8 @@
 class UpdateChecker {
     constructor() {
+        // Decor mode: no network request at all
+        if (window.decor) return;
+
         let https = require("https");
         let electron = require("electron");
         let remote = require("@electron/remote");

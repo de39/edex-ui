@@ -42115,6 +42115,7 @@ Globe.prototype.addPin = function(lat, lon, text, altitude){
     }
 
     this.quadtree.addObject(pin);
+    pin.quadtree_ = this.quadtree; /* edex: lets Pin.remove() take itself out of the quadtree */
 
     if(text.length > 0){
         var collisions = this.quadtree.getCollisionsForObject(pin);
@@ -42150,8 +42151,7 @@ Globe.prototype.addPin = function(lat, lon, text, altitude){
 
     if(this.pins.length > this.maxPins){
         var oldPin = this.pins.shift();
-        this.quadtree.removeObject(oldPin);
-        oldPin.remove();
+        oldPin.remove(); /* edex: also removes it from the quadtree */
 
     }
 
@@ -42241,8 +42241,7 @@ Globe.prototype.setMaxPins = function(_maxPins){
 
     while(this.pins.length > this.maxPins){
         var oldPin = this.pins.shift();
-        this.quadtree.removeObject(oldPin);
-        oldPin.remove();
+        oldPin.remove(); /* edex: also removes it from the quadtree */
     }
 };
 
@@ -42595,8 +42594,10 @@ var Marker = function(lat, lon, text, altitude, previous, scene, _opts){
 
         update();
 
-        this.scene.add(new THREE.Line(_this.geometrySpline, materialSpline));
-        this.scene.add(new THREE.Line(_this.geometrySplineDotted, materialSplineDotted, THREE.LinePieces));
+        _this.lineSpline = new THREE.Line(_this.geometrySpline, materialSpline);
+        _this.lineSplineDotted = new THREE.Line(_this.geometrySplineDotted, materialSplineDotted, THREE.LinePieces);
+        this.scene.add(_this.lineSpline);
+        this.scene.add(_this.lineSplineDotted);
     }
 
     this.scene.add(this.marker);
@@ -42605,6 +42606,9 @@ var Marker = function(lat, lon, text, altitude, previous, scene, _opts){
 };
 
 Marker.prototype.remove = function(){
+    if(this.removed){
+        return;
+    }
     var x = 0;
     var _this = this;
 
@@ -42623,6 +42627,19 @@ Marker.prototype.remove = function(){
         } else {
             _this.scene.remove(ref.geometrySpline);
             _this.scene.remove(ref.geometrySplineDotted);
+            /* edex: actually remove the retracted lines and free their GPU resources (owned by ref) */
+            if(ref.lineSpline){
+                _this.scene.remove(ref.lineSpline);
+                ref.lineSpline.geometry.dispose();
+                ref.lineSpline.material.dispose();
+                ref.lineSpline = null;
+            }
+            if(ref.lineSplineDotted){
+                _this.scene.remove(ref.lineSplineDotted);
+                ref.lineSplineDotted.geometry.dispose();
+                ref.lineSplineDotted.material.dispose();
+                ref.lineSplineDotted = null;
+            }
         }
     }
 
@@ -42634,6 +42651,11 @@ Marker.prototype.remove = function(){
 
     _this.scene.remove(_this.marker);
     _this.scene.remove(_this.labelSprite);
+
+    /* edex: free resources owned by this marker (the marker map texture is shared: scene._encom_markerTexture) */
+    _this.marker.material.dispose();
+    _this.labelSprite.material.map.dispose();
+    _this.labelSprite.material.dispose();
 
     _this.removed = true;
 
@@ -42875,9 +42897,30 @@ Pin.prototype.age = function(){
 };
 
 Pin.prototype.remove = function(){
+    if(this.removed){
+        return;
+    }
     this.scene.remove(this.labelSprite);
     this.scene.remove(this.line);
     this.scene.remove(this.topSprite);
+
+    /* edex: free GPU resources, all of them are created by (and owned by) this pin */
+    this.lineGeometry.dispose();
+    this.line.material.dispose();
+    this.labelSprite.material.map.dispose();
+    this.labelSprite.material.dispose();
+    this.topSprite.material.map.dispose();
+    this.topSprite.material.dispose();
+
+    /* edex: drop the quadtree reference, otherwise every pin ever created stays in memory */
+    if(this.quadtree_){
+        try {
+            this.quadtree_.removeObject(this);
+        } catch(e) {
+            // not in the quadtree anymore
+        }
+        this.quadtree_ = null;
+    }
 
     this.removed = true;
     if(this.smokeVisible){

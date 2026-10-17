@@ -17,42 +17,59 @@ class Toplist {
         this.updateList();
         this.listUpdater = setInterval(() => {
             this.updateList();
-        }, 2000);
+        }, 5000);
+    }
+    // Returns a NEW list (the processes() result may be cached and shared with other modules, so never mutate it).
+    // When excludeThreadsFromToplist is on, entries sharing the same name are merged into the one with the lowest PID
+    // (same result as the former O(n^2) findIndex filter, in O(n) with a Map).
+    static _prepareList(list) {
+        if (!Array.isArray(list)) return [];
+        if (window.settings.excludeThreadsFromToplist !== true) return list.slice();
+
+        let byName = new Map();
+        let out = [];
+        list.slice().sort((a, b) => {
+            return (a.pid-b.pid);
+        }).forEach(e => {
+            let first = byName.get(e.name);
+            if (first) {
+                first.cpu = first.cpu+e.cpu;
+                first.mem = first.mem+e.mem;
+            } else {
+                let copy = Object.assign({}, e);
+                byName.set(e.name, copy);
+                out.push(copy);
+            }
+        });
+        return out;
     }
     updateList() {
         if (this.currentlyUpdating) return;
 
         this.currentlyUpdating = true;
         window.si.processes().then(data => {
-            if (window.settings.excludeThreadsFromToplist === true) {
-                data.list = data.list.sort((a, b) => {
-                    return (a.pid-b.pid);
-                }).filter((e, index, a) => {
-                    let i = a.findIndex(x => x.name === e.name);
-                    if (i !== -1 && i !== index) {
-                        a[i].cpu = a[i].cpu+e.cpu;
-                        a[i].mem = a[i].mem+e.mem;
-                        return false;
-                    }
-                    return true;
-                });
-            }
+            if (!data || !Array.isArray(data.list)) return;
 
-            let list = data.list.sort((a, b) => {
+            let list = Toplist._prepareList(data.list).sort((a, b) => {
                 return ((b.cpu-a.cpu)*100 + b.mem-a.mem);
             }).splice(0, 5);
 
+            let table = document.getElementById("mod_toplist_table");
+            if (!table) return;
             document.querySelectorAll("#mod_toplist_table > tr").forEach(el => {
                 el.remove();
             });
             list.forEach(proc => {
                 let el = document.createElement("tr");
                 el.innerHTML = `<td>${proc.pid}</td>
-                                <td><strong>${proc.name}</strong></td>
+                                <td><strong>${window._escapeHtml(String(proc.name))}</strong></td>
                                 <td>${Math.round(proc.cpu*10)/10}%</td>
                                 <td>${Math.round(proc.mem*10)/10}%</td>`;
-                document.getElementById("mod_toplist_table").append(el);
+                table.append(el);
             });
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
             this.currentlyUpdating = false;
         });
     }
@@ -101,26 +118,18 @@ class Toplist {
             if (currentlyUpdating) return;
             currentlyUpdating = true;
             window.si.processes().then(data => {
-                if (window.settings.excludeThreadsFromToplist === true) {
-                    data.list = data.list.sort((a, b) => {
-                        return (a.pid - b.pid);
-                    }).filter((e, index, a) => {
-                        let i = a.findIndex(x => x.name === e.name);
-                        if (i !== -1 && i !== index) {
-                            a[i].cpu = a[i].cpu + e.cpu;
-                            a[i].mem = a[i].mem + e.mem;
-                            return false;
-                        }
-                        return true;
-                    });
+                if (removed) {
+                    clearInterval(updateInterval);
+                    return;
                 }
+                if (!data || !Array.isArray(data.list)) return;
 
-                data.list.forEach(proc => {
-                    proc.runtime = new Date(Date.now() - Date.parse(proc.started));
+                let procs = Toplist._prepareList(data.list).map(proc => {
+                    // Copy before adding runtime so a cached/shared result is never mutated
+                    return Object.assign({}, proc, {runtime: new Date((window.decor ? window.decor.now().getTime() : Date.now()) - Date.parse(proc.started))});
                 });
 
-                currentlyUpdating = false;
-                let list = data.list.sort((a, b) => {
+                let list = procs.sort((a, b) => {
                     switch (sortKey) {
                         case "PID":
                             if (ascending) return a.pid - b.pid;
@@ -169,25 +178,28 @@ class Toplist {
                     }
                 });
 
-                if (removed) clearInterval(updateInterval);
-                else {
-                    document.querySelectorAll("#processList > tr").forEach(el => {
-                        el.remove();
-                    });
+                let tbody = document.getElementById("processList");
+                if (!tbody) return;
+                document.querySelectorAll("#processList > tr").forEach(el => {
+                    el.remove();
+                });
 
-                    list.forEach(proc => {
-                        let el = document.createElement("tr");
-                        el.innerHTML = `<td class="pid">${proc.pid}</td>
-                            <td class="name">${proc.name}</td>
-                            <td class="user">${proc.user}</td>
-                            <td class="cpu">${Math.round(proc.cpu * 10) / 10}%</td>
-                            <td class="mem">${Math.round(proc.mem * 10) / 10}%</td>
-                            <td class="state">${proc.state}</td>
-                            <td class="started">${proc.started}</td>
-                            <td class="runtime">${formatRuntime(proc.runtime)}</td>`;
-                        document.getElementById("processList").append(el);
-                    });
-                }
+                list.forEach(proc => {
+                    let el = document.createElement("tr");
+                    el.innerHTML = `<td class="pid">${proc.pid}</td>
+                        <td class="name">${window._escapeHtml(String(proc.name))}</td>
+                        <td class="user">${window._escapeHtml(String(proc.user))}</td>
+                        <td class="cpu">${Math.round(proc.cpu * 10) / 10}%</td>
+                        <td class="mem">${Math.round(proc.mem * 10) / 10}%</td>
+                        <td class="state">${window._escapeHtml(String(proc.state))}</td>
+                        <td class="started">${window._escapeHtml(String(proc.started))}</td>
+                        <td class="runtime">${formatRuntime(proc.runtime)}</td>`;
+                    tbody.append(el);
+                });
+            }).catch(e => {
+                console.warn(e);
+            }).finally(() => {
+                currentlyUpdating = false;
             });
         }
 
@@ -216,7 +228,7 @@ class Toplist {
             },
             () => {
                 removed = true;
-                //clearInterval(updateInterval);
+                clearInterval(updateInterval);
             }
         );
 
@@ -237,7 +249,7 @@ class Toplist {
         updateProcessList();
         window.keyboard.attach();
         window.term[window.currentTerm].term.focus();
-        var updateInterval = setInterval(updateProcessList, 1000);
+        var updateInterval = setInterval(updateProcessList, 2000);
     }
 }
 

@@ -175,30 +175,131 @@ function waitForFonts() {
 }
 
 // A proxy function used to add multithreading to systeminformation calls - see backend process manager @ _multithread.js
+// In decor mode (escape-game scenery), every call is answered in-process by the Decor simulator instead.
 function initSystemInformationProxy() {
+    if (window.settings.decorMode === true) {
+        window.decor = window.decor || new Decor(window.settings.decor || {});
+        window.si = window.decor.si;
+        ipc.send("log", "info", "Decor mode: system and network panels are simulated");
+        return;
+    }
+    window.decor = undefined;
+
     const { nanoid } = require("nanoid/non-secure");
+
+    // Results shared between modules for a short while (e.g. Toplist and Cpuinfo both poll processes())
+    const cacheTTL = {
+        processes: 2500,
+        networkInterfaces: 2000
+    };
+    const callTimeout = 20000;
+    const inflight = new Map();
+    const cache = new Map();
+
+    // Consumers mutate results (Toplist sorts/splices processes().list), so shared results are handed out as copies
+    const copy = res => (res === null || typeof res !== "object") ? res : JSON.parse(JSON.stringify(res));
+
+    // Single IPC round-trip. Main replies (res) on success, or (null, "error string") on failure.
+    const request = (prop, args) => {
+        return new Promise((resolve, reject) => {
+            let id = nanoid();
+            let channel = "systeminformation-reply-"+id;
+            let timer = null;
+            let listener = (e, res, err) => {
+                ipc.removeListener(channel, listener);
+                clearTimeout(timer);
+                if (typeof err === "string") {
+                    reject(new Error(`systeminformation.${String(prop)}(): ${err}`));
+                } else {
+                    resolve(res);
+                }
+            };
+            timer = setTimeout(() => {
+                ipc.removeListener(channel, listener);
+                reject(new Error(`systeminformation.${String(prop)}() timed out after ${callTimeout/1000}s`));
+            }, callTimeout);
+            ipc.on(channel, listener);
+            try {
+                ipc.send("systeminformation-call", prop, id, ...args);
+            } catch(e) {
+                ipc.removeListener(channel, listener);
+                clearTimeout(timer);
+                reject(e);
+            }
+        });
+    };
 
     window.si = new Proxy({}, {
         apply: () => {throw new Error("Cannot use sysinfo proxy directly as a function")},
         set: () => {throw new Error("Cannot set a property on the sysinfo proxy")},
         get: (target, prop, receiver) => {
-            return function(...args) {
-                let callback = (typeof args[args.length - 1] === "function") ? true : false;
+            // Never look like a thenable
+            if (typeof prop !== "string" || prop === "then") return undefined;
 
-                return new Promise((resolve, reject) => {
-                    let id = nanoid();
-                    ipc.once("systeminformation-reply-"+id, (e, res) => {
-                        if (callback) {
-                            args[args.length - 1](res);
+            return function(...args) {
+                let callback = (typeof args[args.length - 1] === "function") ? args.pop() : null;
+
+                let key = null;
+                try {
+                    key = prop+":"+JSON.stringify(args);
+                } catch(e) {
+                    // Non-serialisable arguments: no sharing
+                }
+
+                let promise;
+                if (key === null) {
+                    promise = request(prop, args);
+                } else {
+                    let ttl = cacheTTL[prop] || 0;
+                    let cached = (ttl > 0) ? cache.get(key) : undefined;
+
+                    if (cached && Date.now() - cached.time < ttl) {
+                        promise = Promise.resolve(copy(cached.res));
+                    } else {
+                        let entry = inflight.get(key);
+                        if (!entry) {
+                            entry = {
+                                consumers: 0,
+                                promise: request(prop, args).then(res => {
+                                    if (ttl > 0) cache.set(key, {time: Date.now(), res});
+                                    return res;
+                                }).finally(() => {
+                                    inflight.delete(key);
+                                })
+                            };
+                            inflight.set(key, entry);
                         }
-                        resolve(res);
+                        entry.consumers++;
+                        // A lone consumer of an uncached result gets it as-is, everyone else gets a copy
+                        promise = entry.promise.then(res => (ttl > 0 || entry.consumers > 1) ? copy(res) : res);
+                    }
+                }
+
+                if (callback) {
+                    promise = promise.then(res => {
+                        callback(res);
+                        return res;
                     });
-                    ipc.send("systeminformation-call", prop, id, ...args);
-                });
+                }
+                return promise;
             };
         }
     });
 }
+
+// Decor mode simulator, created early so that the boot screen already uses its fake clock
+if (window.settings.decorMode === true) {
+    window.decor = new Decor(window.settings.decor || {});
+}
+
+// The filesystem panel is hidden unless explicitly enabled
+window.showFilesystem = (window.settings.showFilesystem === true);
+
+// Fast boot (on by default in decor mode, or with "fastBoot": true): the UI appears at once instead of
+// playing its ~3.5 s entrance animation. "fastBoot": false keeps the original animation.
+window.fastBoot = (window.settings.fastBoot === true) || (window.settings.decorMode === true && window.settings.fastBoot !== false);
+// Pause used by the startup sequence: skipped in fast boot
+window.uiDelay = ms => window._delay(window.fastBoot ? 0 : ms);
 
 // Init audio
 window.audioManager = new AudioManager();
@@ -207,6 +308,7 @@ window.audioManager = new AudioManager();
 electron.remote.app.focus();
 
 let i = 0;
+let bootLog = null; // declared before displayLine() is first called (TDZ)
 if (window.settings.nointro || window.settings.nointroOverride) {
     initGraphicalErrorHandling();
     initSystemInformationProxy();
@@ -220,7 +322,10 @@ if (window.settings.nointro || window.settings.nointroOverride) {
 // Startup boot log
 function displayLine() {
     let bootScreen = document.getElementById("boot_screen");
-    let log = fs.readFileSync(path.join(__dirname, "assets", "misc", "boot_log.txt")).toString().split('\n');
+    if (bootLog === null) {
+        bootLog = fs.readFileSync(path.join(__dirname, "assets", "misc", "boot_log.txt")).toString().split('\n');
+    }
+    let log = bootLog;
 
     function isArchUser() {
         return require("os").platform() === "linux"
@@ -243,7 +348,7 @@ function displayLine() {
 
     switch(true) {
         case i === 2:
-            bootScreen.innerHTML += `eDEX-UI Kernel version ${electron.remote.app.getVersion()} boot at ${Date().toString()}; root:xnu-1699.22.73~1/RELEASE_X86_64`;
+            bootScreen.innerHTML += `eDEX-UI Kernel version ${electron.remote.app.getVersion()} boot at ${(window.decor ? window.decor.now() : new Date()).toString()}; root:xnu-1699.22.73~1/RELEASE_X86_64`;
         case i === 4:
             setTimeout(displayLine, 500);
             break;
@@ -342,6 +447,8 @@ async function getDisplayName() {
 
 // Create the UI's html structure and initialize the terminal client and the keyboard
 async function initUI() {
+    // Fast boot: skip the entrance choreography (about 3.5 s of deliberate pauses and CSS transitions)
+    if (window.fastBoot) document.body.classList.add("fastboot");
     document.body.innerHTML += `<section class="mod_column" id="mod_column_left">
         <h3 class="title"><p>PANEL</p><p>SYSTEM</p></h3>
     </section>
@@ -353,22 +460,22 @@ async function initUI() {
         <h3 class="title"><p>PANEL</p><p>NETWORK</p></h3>
     </section>`;
 
-    await _delay(10);
+    await uiDelay(10);
 
     window.audioManager.expand.play();
     document.getElementById("main_shell").setAttribute("style", "height:0%;margin-bottom:30vh;");
 
-    await _delay(500);
+    await uiDelay(500);
 
     document.getElementById("main_shell").setAttribute("style", "margin-bottom: 30vh;");
     document.querySelector("#main_shell > h3.title").setAttribute("style", "");
 
-    await _delay(700);
+    await uiDelay(700);
 
     document.getElementById("main_shell").setAttribute("style", "opacity: 0;");
-    document.body.innerHTML += `
+    document.body.innerHTML += `${window.showFilesystem ? `
     <section id="filesystem" style="width: 0px;" class="${window.settings.hideDotfiles ? "hideDotfiles" : ""} ${window.settings.fsListView ? "list-view" : ""}">
-    </section>
+    </section>` : ""}
     <section id="keyboard" style="opacity:0;">
     </section>`;
     window.keyboard = new Keyboard({
@@ -376,11 +483,11 @@ async function initUI() {
         container: "keyboard"
     });
 
-    await _delay(10);
+    await uiDelay(10);
 
     document.getElementById("main_shell").setAttribute("style", "");
 
-    await _delay(270);
+    await uiDelay(270);
 
     let greeter = document.getElementById("main_shell_greeting");
 
@@ -394,24 +501,24 @@ async function initUI() {
 
     greeter.setAttribute("style", "opacity: 1;");
 
-    document.getElementById("filesystem").setAttribute("style", "");
+    if (window.showFilesystem) document.getElementById("filesystem").setAttribute("style", "");
     document.getElementById("keyboard").setAttribute("style", "");
     document.getElementById("keyboard").setAttribute("class", "animation_state_1");
     window.audioManager.keyboard.play();
 
-    await _delay(100);
+    await uiDelay(100);
 
     document.getElementById("keyboard").setAttribute("class", "animation_state_1 animation_state_2");
 
-    await _delay(1000);
+    await uiDelay(1000);
 
     greeter.setAttribute("style", "opacity: 0;");
 
-    await _delay(100);
+    await uiDelay(100);
 
     document.getElementById("keyboard").setAttribute("class", "");
 
-    await _delay(400);
+    await uiDelay(400);
 
     greeter.remove();
 
@@ -451,9 +558,9 @@ async function initUI() {
             }
             i++;
         }
-    }, 500);
+    }, window.fastBoot ? 30 : 500);
 
-    await _delay(100);
+    await uiDelay(100);
 
     // Initialize the terminal
     let shellContainer = document.getElementById("main_shell");
@@ -489,24 +596,38 @@ async function initUI() {
     };
     window.term[0].term.writeln("\033[1m"+`Welcome to eDEX-UI v${electron.remote.app.getVersion()} - Electron v${process.versions.electron}`+"\033[0m");
 
-    await _delay(100);
+    await uiDelay(100);
 
-    window.fsDisp = new FilesystemDisplay({
-        parentId: "filesystem"
-    });
+    if (window.showFilesystem) {
+        window.fsDisp = new FilesystemDisplay({
+            parentId: "filesystem"
+        });
 
-    await _delay(200);
+        await uiDelay(200);
 
-    document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
+        document.getElementById("filesystem").setAttribute("style", "opacity: 1;");
+    }
 
     // Resend terminal CWD to fsDisp if we're hot reloading
     if (window.performance.navigation.type === 1) {
         window.term[window.currentTerm].resendCWD();
     }
 
-    await _delay(200);
+    await uiDelay(200);
 
     window.updateCheck = new UpdateChecker();
+
+    if (window.fastBoot) {
+        // Restore the normal UI transitions, then make sure the terminal fits its final size
+        document.body.classList.remove("fastboot");
+        setTimeout(() => {
+            try {
+                window.term[window.currentTerm].fit();
+            } catch(e) {
+                // terminal not ready yet: it refits itself on connection
+            }
+        }, 300);
+    }
 }
 
 window.themeChanger = theme => {
@@ -545,7 +666,7 @@ window.focusShellTab = number => {
         window.term[number].term.focus();
         window.term[number].resendCWD();
 
-        window.fsDisp.followTab();
+        if (window.fsDisp) window.fsDisp.followTab();
     } else if (number > 0 && number <= 4 && window.term[number] !== null && typeof window.term[number] !== "object") {
         window.term[number] = null;
 
@@ -795,6 +916,22 @@ window.openSettings = async () => {
                             <option>${!window.settings.experimentalFeatures}</option>
                         </select></td>
                     </tr>
+                    <tr>
+                        <td>decorMode</td>
+                        <td>Escape-game scenery mode: simulate every system/network panel (no real system calls)</td>
+                        <td><select id="settingsEditor-decorMode">
+                            <option>${window.settings.decorMode === true}</option>
+                            <option>${window.settings.decorMode !== true}</option>
+                        </select></td>
+                    </tr>
+                    <tr>
+                        <td>showFilesystem</td>
+                        <td>Show the filesystem panel (hidden by default)</td>
+                        <td><select id="settingsEditor-showFilesystem">
+                            <option>${window.settings.showFilesystem === true}</option>
+                            <option>${window.settings.showFilesystem !== true}</option>
+                        </select></td>
+                    </tr>
                 </table>
                 <h6 id="settingsEditorStatus">Loaded values from memory</h6>
                 <br>`,
@@ -820,7 +957,8 @@ window.writeFile = (path) => {
 };
 
 window.writeSettingsFile = () => {
-    window.settings = {
+    let previous = window.settings || {};
+    let formValues = {
         shell: document.getElementById("settingsEditor-shell").value,
         shellArgs: document.getElementById("settingsEditor-shellArgs").value,
         cwd: document.getElementById("settingsEditor-cwd").value,
@@ -840,14 +978,39 @@ window.writeSettingsFile = () => {
         nocursor: (document.getElementById("settingsEditor-nocursor").value === "true"),
         iface: document.getElementById("settingsEditor-iface").value,
         allowWindowed: (document.getElementById("settingsEditor-allowWindowed").value === "true"),
-        forceFullscreen: window.settings.forceFullscreen,
         keepGeometry: (document.getElementById("settingsEditor-keepGeometry").value === "true"),
         excludeThreadsFromToplist: (document.getElementById("settingsEditor-excludeThreadsFromToplist").value === "true"),
         hideDotfiles: (document.getElementById("settingsEditor-hideDotfiles").value === "true"),
         fsListView: (document.getElementById("settingsEditor-fsListView").value === "true"),
         experimentalGlobeFeatures: (document.getElementById("settingsEditor-experimentalGlobeFeatures").value === "true"),
-        experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true")
+        experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true"),
+        decorMode: (document.getElementById("settingsEditor-decorMode").value === "true"),
+        showFilesystem: (document.getElementById("settingsEditor-showFilesystem").value === "true")
     };
+
+    // A structured "env" object cannot be edited in the text field: keep it unless it was actually changed
+    if (previous.env && typeof previous.env === "object" && formValues.env === String(previous.env)) {
+        formValues.env = previous.env;
+    }
+
+    // In decor mode the iface select only lists simulated interfaces ("ksp0"), and Netstat may have reset
+    // window.settings.iface at runtime: keep the iface value currently stored in settings.json instead
+    if (window.decor) {
+        let storedIface;
+        try {
+            storedIface = JSON.parse(fs.readFileSync(settingsFile, {encoding: "utf-8"})).iface;
+        } catch(e) {
+            storedIface = undefined;
+        }
+        formValues.iface = storedIface;
+    }
+
+    // Keep the keys the form does not know about (decor, forceFullscreen, custom keys...), apply the form values over them
+    window.settings = Object.assign({}, previous, formValues);
+
+    // Runtime-only values (CLI flags overrides) must not be persisted
+    delete window.settings.nointroOverride;
+    delete window.settings.nocursorOverride;
 
     Object.keys(window.settings).forEach(key => {
         if (window.settings[key] === "undefined") {
@@ -856,6 +1019,8 @@ window.writeSettingsFile = () => {
     });
 
     fs.writeFileSync(settingsFile, JSON.stringify(window.settings, "", 4));
+    window.settings.nointroOverride = previous.nointroOverride;
+    window.settings.nocursorOverride = previous.nocursorOverride;
     document.getElementById("settingsEditorStatus").innerText = "New values written to settings.json file at "+new Date().toTimeString();
 };
 
@@ -1020,12 +1185,15 @@ window.useAppShortcut = action => {
             window.openShortcutsHelp();
             return true;
         case "FUZZY_SEARCH":
+            if (!window.fsDisp) return false; // searches the filesystem panel's directory
             window.activeFuzzyFinder = new FuzzyFinder();
             return true;
         case "FS_LIST_VIEW":
+            if (!window.fsDisp) return false;
             window.fsDisp.toggleListview();
             return true;
         case "FS_DOTFILES":
+            if (!window.fsDisp) return false;
             window.fsDisp.toggleHidedotfiles();
             return true;
         case "KB_PASSMODE":

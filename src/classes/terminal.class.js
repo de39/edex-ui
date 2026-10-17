@@ -138,9 +138,39 @@ class Terminal {
             let fitAddon = new FitAddon();
             this.term.loadAddon(fitAddon);
             this.term.open(document.getElementById(opts.parentId));
-            this.term.loadAddon(new WebglAddon());
-            let ligaturesAddon = new LigaturesAddon();
-            this.term.loadAddon(ligaturesAddon);
+
+            // WebGL renderer, with fallback to xterm's default canvas renderer (opt-out: settings.termWebGL = false)
+            if (window.settings.termWebGL !== false) {
+                let webglAddon = new WebglAddon();
+                try {
+                    // A GPU reset / context loss would otherwise leave a frozen or blank terminal
+                    webglAddon.onContextLoss(() => {
+                        console.warn("Terminal WebGL context lost, falling back to canvas renderer");
+                        try {
+                            webglAddon.dispose();
+                        } catch(e) {
+                            // already disposed
+                        }
+                    });
+                    this.term.loadAddon(webglAddon);
+                } catch(e) {
+                    console.warn("Terminal WebGL renderer unavailable, using canvas renderer", e);
+                    try {
+                        webglAddon.dispose();
+                    } catch(e2) {
+                        // never activated
+                    }
+                }
+            }
+
+            // Ligatures support scans every installed system font: only load it when the theme actually wants ligatures
+            if (window.theme.terminal.ligatures === true || /code/i.test(window.theme.terminal.fontFamily || "Fira Mono")) {
+                try {
+                    this.term.loadAddon(new LigaturesAddon());
+                } catch(e) {
+                    console.warn("Terminal ligatures addon failed to load", e);
+                }
+            }
             this.term.attachCustomKeyEventHandler(e => {
                 window.keyboard.keydownHandler(e);
                 return true;
@@ -191,6 +221,9 @@ class Terminal {
 
             this.lastSoundFX = Date.now();
             this.socket.addEventListener("message", e => {
+                // Decor mode: make the simulated CPU/network graphs react to terminal activity
+                if (window.decor) window.decor.pulse((typeof e.data === "string") ? e.data.length : ((e.data && e.data.byteLength) || 0));
+
                 let d = Date.now();
 
                 if (d - this.lastSoundFX > 30) {
@@ -314,7 +347,19 @@ class Terminal {
             this.onresize = () => {};
             this.ondisconnected = () => {};
 
-            this._disableCWDtracking = false;
+            this._channel = "terminal_channel-"+this.port;
+            this._sendToRenderer = (...args) => {
+                try {
+                    if (this.renderer && !this.renderer.isDestroyed()) {
+                        this.renderer.send(this._channel, ...args);
+                    }
+                } catch(e) {
+                    // renderer closed
+                }
+            };
+
+            // CWD tracking is not supported on Windows: use the fallback cwd flow right away instead of failing every second
+            this._disableCWDtracking = (process.platform === "win32");
             this._getTtyCWD = tty => {
                 return new Promise((resolve, reject) => {
                     let pid = tty._pid;
@@ -342,24 +387,18 @@ class Terminal {
                     }
                 });
             };
+            // Foreground process name, read from node-pty (no child process spawned)
             this._getTtyProcess = tty => {
-                return new Promise((resolve, reject) => {
-                    let pid = tty._pid;
-                    switch(require("os").type()) {
-                        case "Linux":
-                        case "Darwin":
-                            require("child_process").exec(`ps -o comm --no-headers --sort=+pid -g ${pid} | tail -1`, (e, proc) => {
-                                if (e !== null) {
-                                    reject(e);
-                                } else {
-                                    resolve(proc.trim());
-                                }
-                            });
-                            break;
-                        default:
-                            reject("Unsupported OS");
-                    }
-                });
+                // On Windows node-pty only reports the static name of the spawned file, not the foreground process:
+                // keep showing an empty process name there, as before.
+                if (process.platform === "win32") return "";
+                try {
+                    let proc = tty.process;
+                    if (typeof proc !== "string") return "";
+                    return require("path").basename(proc.trim()).replace(/^-/, "");
+                } catch(e) {
+                    return "";
+                }
             };
             this._nextTickUpdateTtyCWD = false;
             this._nextTickUpdateProcess = false;
@@ -369,40 +408,23 @@ class Terminal {
                     this._getTtyCWD(this.tty).then(cwd => {
                         if (this.tty._cwd === cwd) return;
                         this.tty._cwd = cwd;
-                        if (this.renderer) {
-                            this.renderer.send("terminal_channel-"+this.port, "New cwd", cwd);
-                        }
+                        this._sendToRenderer("New cwd", cwd);
                     }).catch(e => {
                         if (!this._closed) {
                             console.log("Error while tracking TTY working directory: ", e);
                             this._disableCWDtracking = true;
-                            try {
-                                this.renderer.send("terminal_channel-"+this.port, "Fallback cwd", opts.cwd || process.env.PWD);
-                            } catch(e) {
-                                // renderer closed
-                            }
+                            this._sendToRenderer("Fallback cwd", opts.cwd || process.env.PWD);
                         }
                     });
                 }
 
                 if (this.renderer && this._nextTickUpdateProcess) {
                     this._nextTickUpdateProcess = false;
-                    this._getTtyProcess(this.tty).then(process => {
-                        if (this.tty._process === process) return;
-                        this.tty._process = process;
-                        if (this.renderer) {
-                            this.renderer.send("terminal_channel-"+this.port, "New process", process);
-                        }
-                    }).catch(e => {
-                        if (!this._closed) {
-                            console.log("Error while retrieving TTY subprocess: ", e);
-                            try {
-                                this.renderer.send("terminal_channel-"+this.port, "New process", "");
-                            } catch(e) {
-                                // renderer closed
-                            }
-                        }
-                    });
+                    let proc = this._getTtyProcess(this.tty);
+                    if (this.tty._process !== proc) {
+                        this.tty._process = proc;
+                        this._sendToRenderer("New process", proc);
+                    }
                 }
             }, 1000);
 
@@ -414,8 +436,14 @@ class Terminal {
                 env: opts.env || process.env
             });
 
+            this._cleanup = () => {
+                clearInterval(this._tick);
+                if (this._ipcHandler) this.Ipc.removeListener(this._channel, this._ipcHandler);
+            };
+
             this.tty.onExit((code, signal) => {
                 this._closed = true;
+                this._cleanup();
                 this.onclosed(code, signal);
             });
 
@@ -430,15 +458,19 @@ class Terminal {
                     }
                 }
             });
-            this.Ipc.on("terminal_channel-"+this.port, (e, ...args) => {
+            this._ipcHandler = (e, ...args) => {
                 switch(args[0]) {
                     case "Renderer startup":
                         this.renderer = e.sender;
                         if (!this._disableCWDtracking && this.tty._cwd) {
-                            this.renderer.send("terminal_channel-"+this.port, "New cwd", this.tty._cwd);
+                            this._sendToRenderer("New cwd", this.tty._cwd);
                         }
                         if (this._disableCWDtracking) {
-                            this.renderer.send("terminal_channel-"+this.port, "Fallback cwd", opts.cwd || process.env.PWD);
+                            this._sendToRenderer("Fallback cwd", opts.cwd || process.env.PWD);
+                        }
+                        // Re-send the last known process name to a reloaded renderer
+                        if (typeof this.tty._process === "string") {
+                            this._sendToRenderer("New process", this.tty._process);
                         }
                         break;
                     case "Resize":
@@ -454,29 +486,42 @@ class Terminal {
                     default:
                         return;
                 }
-            });
+            };
+            this.Ipc.on(this._channel, this._ipcHandler);
             this.wss.on("connection", ws => {
                 this.onopened(this.tty._pid);
-                ws.on("close", (code, reason) => {
-                    this.ondisconnected(code, reason);
-                });
-                ws.on("message", msg => {
-                    this.tty.write(msg);
-                });
-                this.tty.onData(data => {
+                // One pty data listener per websocket connection, disposed when that connection closes
+                let dataListener = this.tty.onData(data => {
                     this._nextTickUpdateTtyCWD = true;
                     this._nextTickUpdateProcess = true;
+                    if (ws.readyState !== 1) return;
                     try {
                         ws.send(data);
                     } catch (e) {
                         // Websocket closed
                     }
                 });
+                ws.on("close", (code, reason) => {
+                    if (dataListener) {
+                        dataListener.dispose();
+                        dataListener = null;
+                    }
+                    this.ondisconnected(code, reason);
+                });
+                ws.on("message", msg => {
+                    if (this._closed) return;
+                    this.tty.write(msg);
+                });
             });
 
             this.close = () => {
-                this.tty.kill();
+                this._cleanup();
                 this._closed = true;
+                try {
+                    this.tty.kill();
+                } catch(e) {
+                    // pty already exited
+                }
             };
         } else {
             throw "Unknown purpose";

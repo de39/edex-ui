@@ -14,7 +14,8 @@ class Cpuinfo {
 
         this.series = [];
         this.charts = [];
-        window.si.cpu().then(data => {
+        // The first si.cpu() call can fail (proxy timeout, worker restart): retry it, otherwise the panel would stay empty
+        const init = attempt => window.si.cpu().then(data => {
             let divide = Math.floor(data.cores/2);
             this.divide = divide;
 
@@ -57,7 +58,7 @@ class Cpuinfo {
 
             for (var i = 0; i < 2; i++) {
                 this.charts.push(new SmoothieChart({
-                    limitFPS: 30,
+                    limitFPS: 15,
                     responsive: true,
                     millisPerPixel: 50,
                     grid:{
@@ -93,43 +94,60 @@ class Cpuinfo {
             }
 
             for (var i = 0; i < 2; i++) {
-                this.charts[i].streamTo(document.getElementById(`mod_cpuinfo_canvas_${i}`), 500);
+                // Delay matches the 1 s load polling so the line never shows a gap at the leading edge
+                this.charts[i].streamTo(document.getElementById(`mod_cpuinfo_canvas_${i}`), 1000);
             }
 
             // Init updater
+            // MAX box is static: set it once from the initial si.cpu() call
+            try {
+                document.getElementById("mod_cpuinfo_speed_max").innerText = `${data.speedMax}GHz`;
+            } catch(e) {
+                // Fail silently, DOM element is probably getting refreshed (new theme, etc)
+            }
+
             this.updatingCPUload = false;
+            this.updatingCPUtemp = false;
+            this.updatingCPUspeed = false;
+            this.updatingCPUtasks = false;
             this.updateCPUload();
             if (process.platform !== "win32") {this.updateCPUtemp();}
-            this.updatingCPUspeed = false;
             this.updateCPUspeed();
-            this.updatingCPUtasks = false;
             this.updateCPUtasks();
             this.loadUpdater = setInterval(() => {
                 this.updateCPUload();
-            }, 500);
+            }, 1000);
             if (process.platform !== "win32") {
                 this.tempUpdater = setInterval(() => {
                     this.updateCPUtemp();
-                }, 2000);
+                }, 5000);
             }
             this.speedUpdater = setInterval(() => {
                 this.updateCPUspeed();
-            }, 1000);
+            }, 2000);
             this.tasksUpdater = setInterval(() => {
                 this.updateCPUtasks();
             }, 5000);
+        }, e => {
+            console.warn("Cpuinfo: could not retrieve CPU info", e);
+            if (attempt < 20) setTimeout(() => init(attempt + 1), 5000);
+        }).catch(e => {
+            console.warn("Cpuinfo: init failed", e);
         });
+        init(0);
     }
     updateCPUload() {
         if (this.updatingCPUload) return;
         this.updatingCPUload = true;
         window.si.currentLoad().then(data => {
-            let average = [[], []];
+            if (!data || !data.cpus) return; // Prevent memleak in rare case where systeminformation takes extra time to retrieve CPU info (see github issue #216)
 
-            if (!data.cpus) return; // Prevent memleak in rare case where systeminformation takes extra time to retrieve CPU info (see github issue #216)
+            let average = [[], []];
+            let time = new Date().getTime();
 
             data.cpus.forEach((e, i) => {
-                this.series[i].append(new Date().getTime(), e.load);
+                if (!this.series[i]) return;
+                this.series[i].append(time, e.load);
 
                 if (i < this.divide) {
                     average[0].push(e.load);
@@ -138,6 +156,7 @@ class Cpuinfo {
                 }
             });
             average.forEach((stats, i) => {
+                if (stats.length === 0) return;
                 average[i] = Math.round(stats.reduce((a, b) => a + b, 0)/stats.length);
 
                 try {
@@ -146,28 +165,39 @@ class Cpuinfo {
                     // Fail silently, DOM element is probably getting refreshed (new theme, etc)
                 }
             });
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
             this.updatingCPUload = false;
         });
     }
     updateCPUtemp() {
+        if (this.updatingCPUtemp) return;
+        this.updatingCPUtemp = true;
         window.si.cpuTemperature().then(data => {
             try {
                 document.getElementById("mod_cpuinfo_temp").innerText = `${data.max}°C`;
             } catch(e) {
                 // See above notice
             }
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
+            this.updatingCPUtemp = false;
         });
     }
     updateCPUspeed() {
         if (this.updatingCPUspeed) return;
-        this.updatingCPUspeed = true
-        window.si.cpu().then(data => {
+        this.updatingCPUspeed = true;
+        window.si.cpuCurrentSpeed().then(data => {
             try {
-                document.getElementById("mod_cpuinfo_speed_min").innerText = `${data.speed}GHz`;
-                document.getElementById("mod_cpuinfo_speed_max").innerText = `${data.speedMax}GHz`;
+                document.getElementById("mod_cpuinfo_speed_min").innerText = `${data.avg}GHz`;
             } catch(e) {
                 // See above notice
             }
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
             this.updatingCPUspeed = false;
         });
     }
@@ -180,6 +210,9 @@ class Cpuinfo {
             } catch(e) {
                 // See above notice
             }
+        }).catch(e => {
+            console.warn(e);
+        }).finally(() => {
             this.updatingCPUtasks = false;
         });
     }

@@ -8,7 +8,16 @@ class FilesystemDisplay {
         this.cwd_path = null;
         this.iconcolor = `rgb(${window.theme.r}, ${window.theme.g}, ${window.theme.b})`;
         this._formatBytes = (a,b) => {if(0==a)return"0 Bytes";var c=1024,d=b||2,e=["Bytes","KB","MB","GB","TB","PB","EB","ZB","YB"],f=Math.floor(Math.log(a)/Math.log(c));return parseFloat((a/Math.pow(c,f)).toFixed(d))+" "+e[f]};
-        this.fileIconsMatcher = require("./assets/misc/file-icons-match.js");
+        // The generated matcher runs up to ~2400 regexes per file name: memoize results (bounded cache)
+        const _matchIcon = require("./assets/misc/file-icons-match.js");
+        this._iconMatchCache = new Map();
+        this.fileIconsMatcher = name => {
+            if (this._iconMatchCache.has(name)) return this._iconMatchCache.get(name);
+            if (this._iconMatchCache.size > 5000) this._iconMatchCache.clear();
+            let iconName = _matchIcon(name);
+            this._iconMatchCache.set(name, iconName);
+            return iconName;
+        };
         this.icons = require("./assets/icons/file-icons.json");
         this.edexIcons = {
             theme: {
@@ -58,6 +67,7 @@ class FilesystemDisplay {
         this._noTracking = false;
         this._runNextTick = false;
         this._reading = false;
+        this._renderToken = 0;
 
         this._timer = setInterval(() => {
             if (this._runNextTick === true) {
@@ -164,6 +174,7 @@ class FilesystemDisplay {
             if (process.platform === "win32" && dir.endsWith(":")) dir = dir+"\\";
             let tcwd = dir;
             let content = await this._asyncFSwrapper.readdir(tcwd).catch(err => {
+                this._reading = false;
                 console.warn(err);
                 if (this._noTracking === true && this.dirpath) { // #262
                     this.setFailedState();
@@ -175,6 +186,12 @@ class FilesystemDisplay {
                 }
             });
 
+            // readdir failed (error already handled above)
+            if (!Array.isArray(content)) {
+                this._reading = false;
+                return false;
+            }
+
             this.reCalculateDiskUsage(tcwd);
 
             this.cwd = [];
@@ -182,7 +199,9 @@ class FilesystemDisplay {
             await new Promise((resolve, reject) => {
                 if (content.length === 0) resolve();
 
-                content.forEach(async (file, i) => {
+                // Resolve once every lstat has completed (they finish in any order)
+                let pending = content.length;
+                content.forEach(async file => {
                     let fstat = await this._asyncFSwrapper.lstat(path.join(tcwd, file)).catch(e => {
                         if (!e.message.includes("EPERM") && !e.message.includes("EBUSY")) {
                             reject();
@@ -230,11 +249,15 @@ class FilesystemDisplay {
                     if (file.startsWith(".")) e.hidden = true;
 
                     this.cwd.push(e);
-                    if (i === content.length-1) resolve();
+                    pending--;
+                    if (pending === 0) resolve();
                 });
             }).catch(() => { this.setFailedState() });
 
-            if (this.failed) return false;
+            if (this.failed) {
+                this._reading = false;
+                return false;
+            }
 
             let ordering = {
                 dir: 0,
@@ -292,6 +315,9 @@ class FilesystemDisplay {
             let blockList = JSON.parse(JSON.stringify(originBlockList));
 
             if (this.failed === true) return false;
+
+            // Any animation loop still running from a previous render must stop
+            let renderToken = ++this._renderToken;
 
             if (isDiskView) {
                 document.getElementById("fs_disp_title_dir").innerText = "Showing available block devices";
@@ -484,13 +510,17 @@ class FilesystemDisplay {
                 document.getElementById("fs_space_bar").setAttribute("onclick", "");
             }
 
-            // Render animation
+            // Render animation: animate (with sound) only the first entries, then reveal the rest at once
             let id = 0;
-            while (this.filesContainer.childNodes[id]) {
-                let e = this.filesContainer.childNodes[id];
+            let animated = 0;
+            let nodes = this.filesContainer.childNodes;
+            while (nodes[id]) {
+                if (renderToken !== this._renderToken) return;
+                let e = nodes[id];
                 e.setAttribute("class", e.className.replace(" animationWait", ""));
 
-                if (window.settings.hideDotfiles !== true || e.className.indexOf("hidden") === -1) {
+                if (animated < 40 && (window.settings.hideDotfiles !== true || e.className.indexOf("hidden") === -1)) {
+                    animated++;
                     window.audioManager.folder.play();
                     await _delay(30);
                 }
@@ -508,17 +538,25 @@ class FilesystemDisplay {
                 this.space_bar.text.innerHTML = "Could not calculate mountpoint usage.";
                 this.space_bar.bar.value = 100;
             }).then(d => {
+                if (!Array.isArray(d)) return;
                 d.forEach(fsBlock => {
                     if (path.startsWith(fsBlock.mount)) {
                         this.fsBlock = fsBlock;
                     }
                 });
+                if (this.fsBlock === null && !document.getElementById("fs_space_bar").getAttribute("onclick")) {
+                    // No mountpoint matches this path: do not stay on "Calculating available space..." forever
+                    this.space_bar.text.innerHTML = "Could not calculate mountpoint usage.";
+                    this.space_bar.bar.value = 100;
+                    return;
+                }
                 this.renderDiskUsage(this.fsBlock);
             });
         };
 
         this.renderDiskUsage = async fsBlock => {
-            if (document.getElementById("fs_space_bar").getAttribute("onclick") !== "" || fsBlock === null) return;
+            // onclick is only set (non-empty) while showing the disks view; it is null before the first render
+            if (document.getElementById("fs_space_bar").getAttribute("onclick") || fsBlock === null) return;
 
             let splitter = (process.platform === "win32") ? "\\" : "/";
             let displayMount = (fsBlock.mount.length < 18) ? fsBlock.mount : "..."+splitter+fsBlock.mount.split(splitter).pop();
@@ -543,7 +581,13 @@ class FilesystemDisplay {
         // ...except if we're hot-reloading, in which case this can mess up the rendering
         // See #392
         if (window.performance.navigation.type === 0) {
-            this.readFS(window.term[window.currentTerm].cwd || window.settings.cwd);
+            let startCwd = window.term[window.currentTerm].cwd;
+            if (typeof startCwd === "string" && startCwd.startsWith("FALLBACK |-- ")) {
+                // Fallback cwd already received from the terminal (e.g. CWD tracking unsupported on Windows)
+                window.term[window.currentTerm].oncwdchange(startCwd);
+            } else {
+                this.readFS(startCwd || window.settings.cwd);
+            }
         }
 
         this.openFile = (name, path, type) => { //Might add text formatting at some point, not now though - Surge
