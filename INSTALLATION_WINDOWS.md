@@ -63,6 +63,16 @@ Dans la suite, on appelle ce dossier `resources` le **dossier d'installation**.
 
    On obtient un dossier `resources\app` qui contient `_boot.js`, `ui.html`, `classes`, `node_modules`…
 
+5. **Vérification obligatoire** avant de continuer :
+
+   ```powershell
+   Test-Path app\node_modules\signale
+   ```
+
+   La réponse doit être `True`. Si c'est `False`, ou si la commande `extract` a affiché du texte rouge (par exemple `EPERM` ou `operation not permitted`), l'extraction a échoué. La cause habituelle est un PowerShell qui n'a pas été ouvert en administrateur alors qu'eDEX est dans `C:\Program Files`.
+
+   Dans ce cas, **ne pas continuer** : supprimer le dossier `app` (`Remove-Item app -Recurse -Force`), rouvrir PowerShell en administrateur et refaire l'étape 3. Sinon, eDEX affichera au lancement l'erreur « Cannot find module 'signale' ».
+
 ## Étape 4 : copier les nouveaux fichiers par-dessus
 
 Toujours dans PowerShell, dans le dossier d'installation, en adaptant le chemin du dossier source :
@@ -137,6 +147,19 @@ Lancer eDEX-UI avec le raccourci habituel, puis vérifier ces points :
 | Gestionnaire des tâches, onglet Détails | Plus de `wmic.exe` ni de `powershell.exe` qui apparaissent en boucle |
 
 Si l'écran reste noir ou si une erreur s'affiche, passer au retour arrière ci-dessous, puis me transmettre le message d'erreur.
+
+### Erreur « Cannot find module 'signale' » au lancement
+
+Le dossier `app` a été créé sans les librairies d'eDEX (`node_modules`) : l'extraction de l'étape 3 n'a pas abouti. Pour réparer, dans un PowerShell **ouvert en administrateur**, dans le dossier d'installation :
+
+```powershell
+Rename-Item app app_casse
+Copy-Item app.asar.bak app.asar
+npx @electron/asar extract app.asar app
+Test-Path app\node_modules\signale
+```
+
+La dernière commande doit afficher `True`. Ensuite, reprendre l'étape 4 (copie des nouveaux fichiers) et l'étape 5 (`Remove-Item app.asar`), puis relancer eDEX. Quand tout fonctionne, le dossier `app_casse` peut être supprimé.
 
 ## Mettre à jour `game.js`
 
